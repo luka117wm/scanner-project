@@ -1,0 +1,35 @@
+# Сборка C++
+build/
+*.pyd
+*.dll
+*.lib
+*.exp
+*.ilk
+*.pdb
+CMakeCache.txt
+CMakeFiles/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# Данные (не в git — слишком большие)
+data/
+
+# Внешние инструменты (скачиваются вручную)
+tools/
+
+# IDE
+.vscode/settings.json
+.vs/
+*.user
+
+# ОС
+Thumbs.db
+desktop.ini

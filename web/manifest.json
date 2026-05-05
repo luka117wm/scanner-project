@@ -1,0 +1,9 @@
+{
+  "name": "Scanner 3D",
+  "short_name": "Scanner",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#16213e",
+  "icons": []
+}
