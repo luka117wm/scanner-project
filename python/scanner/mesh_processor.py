@@ -53,14 +53,19 @@ class MeshProcessor:
         logger.info("  SOR: %d -> %d pts", before, pc.size())
 
         # Шаг 2b: Radius Outlier Removal — scatter-шум (трава, листья, одиночки)
+        # Пропускаем для разреженных облаков (<500K): маленький eps → удаляет
+        # настоящие точки объекта из-за низкой плотности (low quality COLMAP).
         eps = self._estimate_dbscan_eps(pc)
-        ror_radius = eps * self.config.ror_radius_factor
-        before = pc.size()
-        pc = self._radius_outlier_removal(pc, radius=ror_radius,
-                                          nb_points=self.config.ror_nb_points)
-        logger.info("  ROR: %d -> %d pts (r=%.5f=eps*%.1f, min_nb=%d)",
-                    before, pc.size(), ror_radius,
-                    self.config.ror_radius_factor, self.config.ror_nb_points)
+        if pc.size() >= 500_000:
+            ror_radius = eps * self.config.ror_radius_factor
+            before = pc.size()
+            pc = self._radius_outlier_removal(pc, radius=ror_radius,
+                                              nb_points=self.config.ror_nb_points)
+            logger.info("  ROR: %d -> %d pts (r=%.5f=eps*%.1f, min_nb=%d)",
+                        before, pc.size(), ror_radius,
+                        self.config.ror_radius_factor, self.config.ror_nb_points)
+        else:
+            logger.info("  ROR: skipped (sparse cloud %d pts < 500K)", pc.size())
 
         # Шаг 2c: удалить доминирующую плоскость (стол) перед DBSCAN
         if self.config.remove_ground_plane:
@@ -252,10 +257,18 @@ class MeshProcessor:
 
         # Определяем «верхнюю» сторону (там объект — больше не-плоских точек)
         non_plane = signed[~inliers]
-        if (non_plane > 0).sum() >= (non_plane < 0).sum():
-            keep = signed > threshold    # оставить только выше плоскости
+        obj_above = (non_plane > 0).sum()
+        obj_below = (non_plane < 0).sum()
+
+        if obj_above >= obj_below:
+            # Объект сверху: удалить inliers + всё что чётко ниже плоскости.
+            # НЕ трогаем точки у основания объекта (signed ≈ 0+) — иначе
+            # срезаем дно объекта, лежащего на столе.
+            clearly_below = signed < -threshold * 3
+            keep = ~inliers & ~clearly_below
         else:
-            keep = signed < -threshold   # оставить только ниже плоскости
+            clearly_above = signed > threshold * 3
+            keep = ~inliers & ~clearly_above
 
         n_removed = int((~keep).sum())
         logger.info("  Ground plane: inliers=%.1f%%, removed=%d (%.1f%%), kept=%d",

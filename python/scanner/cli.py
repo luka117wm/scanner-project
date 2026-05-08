@@ -99,6 +99,7 @@ def _cmd_process_cloud(args: argparse.Namespace) -> int:
         target_height_mm=args.height,
         add_base=not args.no_base,
         auto_orient=not args.no_orient,
+        remove_ground_plane=args.remove_ground_plane,
     )
     from .exporter import Exporter
     from .mesh_processor import MeshProcessor
@@ -214,9 +215,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pc = sub.add_parser("process-cloud", help="Point cloud PLY -> STL (no COLMAP)")
     p_pc.add_argument("--input",  "-i", required=True, metavar="PLY", help="fused.ply path")
     p_pc.add_argument("--output", "-o", required=True, metavar="FILE", help="Output STL")
-    p_pc.add_argument("--height",    type=float, default=100.0, metavar="MM")
-    p_pc.add_argument("--no-base",   action="store_true")
-    p_pc.add_argument("--no-orient", action="store_true")
+    p_pc.add_argument("--height",               type=float, default=100.0, metavar="MM")
+    p_pc.add_argument("--no-base",              action="store_true")
+    p_pc.add_argument("--no-orient",            action="store_true")
+    p_pc.add_argument("--remove-ground-plane",  action="store_true")
 
     # ── diagnose ──────────────────────────────────────────────────────────────
     p_diag = sub.add_parser("diagnose",

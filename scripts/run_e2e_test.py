@@ -1,20 +1,19 @@
 """
-End-to-end test runner: photos -> STL
+End-to-end test runner: photos/video -> STL
 Usage:
-    python scripts/run_e2e_test.py tst3
-    python scripts/run_e2e_test.py tst2
-    python scripts/run_e2e_test.py tst1
+    python scripts/run_e2e_test.py tst4
+    python scripts/run_e2e_test.py tst1_video
     python scripts/run_e2e_test.py all
+    python scripts/run_e2e_test.py --quality low all
 """
 from __future__ import annotations
 
-import io
 import logging
 import sys
 import time
 from pathlib import Path
 
-# Force UTF-8 on Windows console to avoid encoding errors in Russian log strings
+# Force UTF-8 on Windows console
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
@@ -22,10 +21,25 @@ if hasattr(sys.stderr, "reconfigure"):
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PYTHON_DIR = PROJECT_ROOT / "python"
-
 sys.path.insert(0, str(PYTHON_DIR))
 
-# ── Logging: file + console ────────────────────────────────────────────────────
+# ── Конфигурация тестов ────────────────────────────────────────────────────────
+
+# Каждый тест: (input_path, is_video, remove_ground_plane)
+TEST_CONFIGS: dict[str, tuple[Path, bool, bool]] = {
+    "tst1_video": (
+        PROJECT_ROOT / "data" / "test_videos" / "tst1.mp4",
+        True, False,
+    ),
+    "tst2": (PROJECT_ROOT / "data" / "test_images" / "tst2", False, False),
+    "tst3": (PROJECT_ROOT / "data" / "test_images" / "tst3", False, False),
+    "tst4": (PROJECT_ROOT / "data" / "test_images" / "tst4", False, True),
+    "tst5": (PROJECT_ROOT / "data" / "test_images" / "tst5", False, False),
+    "tst6": (PROJECT_ROOT / "data" / "test_images" / "tst6", False, False),
+    "tst7": (PROJECT_ROOT / "data" / "test_images" / "tst7", False, False),
+}
+
+# ── Logging ────────────────────────────────────────────────────────────────────
 
 LOG_DIR = PROJECT_ROOT / "data" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -37,6 +51,9 @@ def setup_logging(test_name: str) -> Path:
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
+    # Удалить старые хэндлеры от предыдущих тестов
+    for h in root.handlers[:]:
+        root.removeHandler(h)
 
     fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s",
                             datefmt="%H:%M:%S")
@@ -57,28 +74,38 @@ def setup_logging(test_name: str) -> Path:
 # ── Test runner ────────────────────────────────────────────────────────────────
 
 def run_test(test_name: str) -> bool:
-    log_file = setup_logging(test_name)
-    logger = logging.getLogger("e2e")
+    if test_name not in TEST_CONFIGS:
+        print(f"Unknown test: {test_name!r}")
+        return False
 
-    images_dir = PROJECT_ROOT / "data" / "test_images" / test_name
+    input_path, is_video, remove_gp = TEST_CONFIGS[test_name]
+    # --remove-ground-plane флаг переопределяет конфиг теста
+    if _REMOVE_GROUND_PLANE:
+        remove_gp = True
+
     output_path = PROJECT_ROOT / "data" / "results" / f"{test_name}_output.stl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    log_file = setup_logging(test_name)
+    logger = logging.getLogger("e2e")
+
     logger.info("=" * 60)
-    logger.info("E2E test: %s", test_name)
-    logger.info("  images: %s", images_dir)
+    logger.info("E2E test: %s  [%s]", test_name, "video" if is_video else "images")
+    logger.info("  input:  %s", input_path)
     logger.info("  output: %s", output_path)
+    logger.info("  quality: %s  remove_gp: %s", _QUALITY, remove_gp)
     logger.info("  log:    %s", log_file)
     logger.info("=" * 60)
 
-    if not images_dir.exists():
-        logger.error("Images directory not found: %s", images_dir)
+    if not input_path.exists():
+        logger.error("Input not found: %s", input_path)
         return False
 
-    n_images = sum(1 for f in images_dir.iterdir()
-                   if f.is_file() and f.suffix.lower() in
-                   {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"})
-    logger.info("Found %d images", n_images)
+    if not is_video:
+        n = sum(1 for f in input_path.iterdir()
+                if f.is_file() and f.suffix.lower() in
+                {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"})
+        logger.info("Found %d images", n)
 
     from scanner.config import ScanConfig
     from scanner.pipeline import ScanPipeline
@@ -88,11 +115,10 @@ def run_test(test_name: str) -> bool:
         target_height_mm=100.0,
         add_base=True,
         auto_orient=True,
-        remove_ground_plane=_REMOVE_GROUND_PLANE,
+        remove_ground_plane=remove_gp,
     )
 
     pipeline = ScanPipeline(cfg)
-
     last_step = ""
 
     def on_progress(step: str, progress: float) -> None:
@@ -103,7 +129,7 @@ def run_test(test_name: str) -> bool:
 
     t0 = time.monotonic()
     try:
-        result = pipeline.scan(images_dir, output_path,
+        result = pipeline.scan(input_path, output_path,
                                progress_callback=on_progress)
     except Exception:
         logger.exception("Pipeline FAILED")
@@ -116,7 +142,7 @@ def run_test(test_name: str) -> bool:
     logger.info("  output:   %s", result.output_path)
     logger.info("  images:   %d", result.n_images)
     logger.info("  matcher:  %s", result.matcher_used)
-    logger.info("  elapsed:  %.1f s", elapsed)
+    logger.info("  elapsed:  %.1f s (%.1f min)", elapsed, elapsed / 60)
     if result.export:
         e = result.export
         logger.info("  watertight:  %s", e.is_watertight)
@@ -134,47 +160,51 @@ def run_test(test_name: str) -> bool:
     return result.ok
 
 
-_QUALITY = "medium"           # changed via --quality
-_REMOVE_GROUND_PLANE = False  # changed via --remove-ground-plane
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+_QUALITY = "low"
+_REMOVE_GROUND_PLANE = False
+
+VALID = sorted(TEST_CONFIGS.keys())
 
 
 def main() -> None:
     global _QUALITY, _REMOVE_GROUND_PLANE
-    tests = ["tst5", "tst4", "tst3", "tst2", "tst1"]
 
     args = sys.argv[1:]
-    # parse --quality low/medium/high
+
     if "--quality" in args:
         qi = args.index("--quality")
         _QUALITY = args[qi + 1]
         args = args[:qi] + args[qi + 2:]
-    # parse --remove-ground-plane
+
     if "--remove-ground-plane" in args:
         _REMOVE_GROUND_PLANE = True
         args = [a for a in args if a != "--remove-ground-plane"]
 
-    arg = args[0] if args else "tst3"
+    arg = args[0] if args else "tst5"
 
     if arg == "all":
-        to_run = tests
-    elif arg in tests:
+        to_run = VALID
+    elif arg in TEST_CONFIGS:
         to_run = [arg]
     else:
-        print(f"Unknown: {arg!r}. Usage: run_e2e_test.py [--quality low|medium|high] "
-              f"[--remove-ground-plane] tst2|tst3|tst1|tst5|all")
+        print(f"Unknown: {arg!r}")
+        print(f"Usage: run_e2e_test.py [--quality low|medium|high] "
+              f"[--remove-ground-plane] {'|'.join(VALID)}|all")
         sys.exit(1)
 
     results: dict[str, bool] = {}
     for name in to_run:
         ok = run_test(name)
         results[name] = ok
-        # brief pause between tests
         if name != to_run[-1]:
             time.sleep(2)
 
     print("\n--- Summary ---")
     for name, ok in results.items():
-        print(f"  {name}: {'OK' if ok else 'FAILED'}")
+        status = "OK" if ok else "FAILED"
+        print(f"  {name}: {status}")
 
     if not all(results.values()):
         sys.exit(1)
