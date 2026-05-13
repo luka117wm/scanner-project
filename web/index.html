@@ -3,13 +3,91 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Scanner 3D</title>
-  <link rel="manifest" href="manifest.json">
+  <title>3D Scanner</title>
   <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
-  <div id="app">
-    <!-- TODO: UI загрузки файлов, прогресс, 3D-вьюер -->
+  <div id="layout">
+
+    <!-- ── Левая панель ──────────────────────────────────── -->
+    <aside id="panel">
+      <div class="panel-title">3D Scanner</div>
+
+      <!-- Папка с фото -->
+      <section class="section">
+        <div class="section-label">Папка с фотографиями</div>
+        <div class="folder-row">
+          <input id="folderPath" type="text" placeholder="C:\Users\...\photos" spellcheck="false">
+          <button id="folderBtn" class="icon-btn" title="Выбрать папку">&#128193;</button>
+        </div>
+        <button id="startBtn" class="btn-primary">Начать сканирование</button>
+      </section>
+
+      <!-- Прогресс -->
+      <section class="section">
+        <div class="progress-track">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <div id="progressLabel" class="progress-label">—</div>
+        <div id="log" class="log"></div>
+      </section>
+
+      <!-- Инструменты — активируются после сканирования -->
+      <section class="section tools-section">
+        <div class="section-label">Редактирование</div>
+        <div class="tool-group">
+          <button class="tool-btn" data-mode="orient"  disabled>Orient</button>
+          <button class="tool-btn" data-mode="denoise" disabled>Denoise</button>
+          <button class="tool-btn" data-mode="repair"  disabled>Repair</button>
+        </div>
+        <div class="section-label" style="margin-top:12px">Экспорт</div>
+        <div class="tool-group">
+          <button class="export-btn" id="exportStl" disabled>Export STL</button>
+          <button class="export-btn" id="exportObj" disabled>OBJ + tex</button>
+        </div>
+      </section>
+    </aside>
+
+    <!-- ── 3D вьюер ──────────────────────────────────────── -->
+    <main id="viewport">
+      <canvas id="canvas"></canvas>
+      <div id="hint">Выберите папку с фотографиями<br>и запустите сканирование</div>
+
+      <!-- Прямоугольник выделения точек (Denoise) -->
+      <div id="sel-rect"></div>
+
+      <!-- Orient toolbar — появляется поверх вьюера в режиме orient -->
+      <div id="orient-tools" class="tool-overlay">
+        <button class="ot-btn active" id="otRotate">⟳ Rotate</button>
+        <button class="ot-btn"        id="otTranslate">&#8596; Move</button>
+        <div class="ot-sep"></div>
+        <button class="ot-btn" id="otX">&#8635; X</button>
+        <button class="ot-btn" id="otY">&#8635; Y</button>
+        <button class="ot-btn" id="otZ">&#8635; Z</button>
+        <div class="ot-sep"></div>
+        <button class="ot-btn"        id="otAuto">Авто</button>
+        <button class="ot-btn accent" id="otApply">Применить ✓</button>
+      </div>
+
+      <!-- Denoise toolbar -->
+      <div id="denoise-tools" class="tool-overlay">
+        <span class="ot-info" id="dnCount">Shift+drag — выделить точки</span>
+        <div class="ot-sep"></div>
+        <button class="ot-btn accent" id="dnDelete" disabled>Удалить</button>
+        <button class="ot-btn"        id="dnClear">Снять выделение</button>
+        <div class="ot-sep"></div>
+        <button class="ot-btn" id="dnRemesh">Пересчитать меш</button>
+      </div>
+    </main>
+
   </div>
   <script type="module" src="js/app.js"></script>
 </body>

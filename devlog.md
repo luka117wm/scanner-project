@@ -65,6 +65,69 @@
 
 ---
 
+## 2026-05-13 — Десктоп приложение: FastAPI + Three.js UI (фазы 11.A–11.D)
+
+### Что сделано
+
+Начата реализация десктопного приложения. Пайплайн (C++/Python) готов, теперь интерфейс.
+Стек: **FastAPI** (localhost:8765) + **Three.js r165** + **pywebview** (фаза 11.G, позже).
+
+#### Фаза 11.A — FastAPI бэкенд (`python/api/server.py`, `python/api/run.py`)
+
+- `POST /api/scan/start` — принимает путь к папке, запускает `ScanPipeline` в `daemon` потоке
+- `GET /api/scan/stream` — SSE: шлёт `{step, progress, status}` каждые 0.5 сек; при `done` добавляет пути к PLY/mesh
+- `GET /api/result/ply` — отдаёт `point_cloud_clean.ply`
+- `GET /api/result/mesh` — отдаёт `mesh_repaired.ply` / `mesh_fixed.ply`
+- `GET /api/status` — текущий state
+- `StaticFiles` → `web/` на `/`; лог сервера в `data/results/server_{ts}.log`
+- 409 если пайплайн уже запущен; `threading.Lock` для thread-safety
+
+#### Фаза 11.B — Three.js UI (`web/`)
+
+- `index.html`: layout flex — левая панель 280px + canvas справа; тёмная тема `#1a1a2e / #4fc3f7`
+- `app.js`: кнопка выбора папки (pywebview API + fallback текстовый ввод), POST к API, SSE прогресс-бар + лог (5 строк), активация кнопок инструментов после `done`
+- `viewer.js`: `PLYLoader` → `Points` с `VertexColors` или белый; `OrbitControls` с damping; мини-оси `AxesHelper` в нижнем левом углу (отдельная сцена 80×80 px); `loadPLY(url)` / `setMode(mode)`
+
+#### Фаза 11.C — Orient (`viewer.js` + `server.py`)
+
+- `TransformControls` (Three.js) прикрепляется к мешу; по умолчанию `rotate`
+- Тулбар поверх вьюера: `[⟳ Rotate] [↔ Move] | [↺X] [↺Y] [↺Z] | [Авто] [Применить ✓]`
+- Снапы `↺X/Y/Z` — `Quaternion.premultiply` на `PI/2` вокруг оси
+- `[Применить]` → `mesh.matrix.elements` (16 float, column-major) → `POST /api/edit/apply-transform` → numpy трансформ вершин через trimesh → `mesh_oriented.ply`
+- `POST /api/edit/auto-orient` → `PrintPreparation(mesh).auto_orient()` → `mesh_oriented.ply`
+- `GET /api/result/oriented` → `mesh_oriented.ply` (fallback `mesh_repaired.ply`)
+- `OrbitControls` отключается пока тащишь гизмо (`dragging-changed` event)
+
+#### Фаза 11.D — Denoise (`viewer.js` + `server.py`)
+
+- `Shift+drag` рисует прямоугольник (`#sel-rect`), на `mouseup`:
+  - Проецирует все вершины в NDC через `projectionMatrix × matrixWorldInverse`
+  - Проверяет попадание в прямоугольник → `selectedIndices[]`
+- Выделенные точки → атрибут `color` = красный; повторные выделения накапливаются
+- `[Удалить]` → `POST /api/edit/delete-points {indices}` → numpy mask на `pc.points/normals/colors` → `estimate_normals(k=30)` → сохраняет на место; `loadPLY` перезагружает облако
+- `[Пересчитать меш]` → `POST /api/edit/remesh` → запускает `MeshProcessor.process_cloud` в thread → SSE прогресс через `CustomEvent('remesh-started')` в app.js
+- `[Снять выделение]` → восстановить оригинальные цвета
+
+### Архитектурные решения
+
+- SSE (`text/event-stream`) вместо WebSocket — проще, достаточно для односторонних апдейтов
+- Один `_state` dict с `threading.Lock` вместо `asyncio.Queue` — thread пишет, SSE читает
+- Денойс использует ручной проецирование вершин вместо `SelectionBox` (он работает с объектами, не с отдельными точками)
+- `CustomEvent('remesh-started')` для коммуникации между viewer.js и app.js без circular imports
+- После `apply-transform` сервер применяет матрицу к вершинам и сбрасывает transform объекта в identity — пользователь видит «очищенный» гизмо
+
+### Обновлён `scanner-guide-obsidian-v3.md`
+
+Добавлена **Фаза 11** (7 промптов: A–G) в конец гайда — поэтапный план всего десктопного приложения с короткими копируемыми промптами в стиле предыдущих фаз.
+
+### Следующие шаги (фазы 11.E–11.G)
+
+- **11.E Repair** — подсветка открытых рёбер (`LineSegments` красным), `fill-holes`, `smooth`
+- **11.F Export** — STL скачать, OBJ+texture ZIP через COLMAP `texture_mapper`
+- **11.G pywebview** — нативное окно, `get_folder()` диалог, `run_desktop.ps1`
+
+---
+
 ## 2026-05-12 — tst7 (кролик в саду), улучшения ground plane, старт UI
 
 ### tst7: кролик на пне в саду (222 фото, medium quality)

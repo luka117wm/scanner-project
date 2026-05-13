@@ -696,3 +696,216 @@ Three.js STL viewer (уже есть в web/)
 > 3. `cd D:\3ds\scanner-project` → `claude`
 > 4. Копировать промпт → Claude Code пишет + тестирует
 > 5. Ошибка → дать Claude Code ошибку → исправит
+
+---
+
+## Фаза 11 — Десктоп приложение
+
+> [!info] Стек
+> **FastAPI** (localhost:8765) + **Three.js r165** (3D вьюер) + **pywebview** (нативное окно Windows)
+> Пайплайн (C++/Python) готов. Эта фаза — только интерфейс.
+
+| Шаг | Что делаем | Файлы |
+|-----|-----------|-------|
+| 11.A | FastAPI бэкенд + SSE прогресс | `python/api/server.py` |
+| 11.B | UI: выбор папки → прогресс → PLY облако | `web/index.html`, `app.js`, `viewer.js` |
+| 11.C | Orient: трансформ-гизмо, снапы по осям | `viewer.js` + `server.py` |
+| 11.D | Denoise: выделение и удаление точек | `viewer.js` + `server.py` |
+| 11.E | Repair: открытые рёбра, закрытие дыр | `viewer.js` + `server.py` |
+| 11.F | Export: STL + OBJ с текстурой (ZIP) | `server.py` + `colmap_runner.py` |
+| 11.G | pywebview: нативное окно без браузера | `python/desktop.py` |
+
+---
+
+### Промпт 11.A — FastAPI бэкенд
+
+```
+python/api/server.py — локальный сервер, порт 8765.
+
+Эндпоинты:
+POST /api/scan/start   {images_dir: str} → запустить ScanPipeline в threading.Thread
+GET  /api/scan/stream  → SSE: каждые 0.5с шлёт {step, progress, status}
+                          при done добавить {result_ply, result_mesh}
+GET  /api/result/ply   → отдать point_cloud_clean.ply (octet-stream)
+GET  /api/result/mesh  → отдать mesh_repaired.ply / mesh_fixed.ply
+GET  /api/status       → текущий state JSON
+GET  /                 → StaticFiles из web/
+
+Детали:
+- progress_callback(step, progress) → писать в dict, защитить threading.Lock
+- Если pipeline кидает Exception → state["error"], status="error"
+- 409 если уже запущен
+- Логи: data/results/server_{ts}.log, FileHandler UTF-8
+
+python/api/run.py:
+  uvicorn.run(app, host="127.0.0.1", port=8765)
+```
+
+> [!check] Тест: `python python/api/run.py` → `GET /api/status` возвращает JSON
+
+---
+
+### Промпт 11.B — Three.js UI
+
+```
+web/index.html, web/css/style.css, web/js/app.js, web/js/viewer.js
+
+Макет:
+- Левая панель 280px: кнопка "Выбрать папку" (input webkitdirectory),
+  прогресс-бар, лог 5 последних шагов, кнопки [Orient][Denoise][Repair][Export STL][OBJ+tex]
+- Правая область: Three.js canvas на 100% оставшегося места
+- Тёмная тема: фон #1a1a2e, текст #e0e0e0, акцент #4fc3f7
+
+app.js:
+1. Кнопка папки → POST /api/scan/start {images_dir}
+2. EventSource('/api/scan/stream') → прогресс-бар + лог
+3. При status=done → viewer.loadPLY('/api/result/ply')
+4. Кнопки инструментов → viewer.setMode('orient'|'denoise'|'repair')
+
+viewer.js (Three.js r165 из CDN):
+- PLYLoader → Points: VertexColors если есть, иначе белый, pointSize=0.002
+- OrbitControls
+- AxesHelper в мини-сцене (левый нижний угол)
+- Экспорт: { loadPLY(url), setMode(mode) }
+```
+
+> [!check] Тест: открыть папку → прогресс-бар → облако точек на экране
+
+---
+
+### Промпт 11.C — Orient
+
+```
+Режим 'orient'. Изменить viewer.js и server.py.
+
+viewer.js:
+- Загрузить меш (GET /api/result/mesh) как MeshStandardMaterial #8ecae6, двусторонний
+- TransformControls: по умолчанию 'rotate'
+- Кнопки: [R] rotate / [T] translate / [↺X] [↺Y] [↺Z] — поворот 90°
+- [Авто] → POST /api/edit/auto-orient → перезагрузить меш
+- [Применить] → взять matrix4 из объекта → POST /api/edit/apply-transform {matrix: [16 float]}
+- Освещение: AmbientLight(0xffffff, 0.4) + DirectionalLight сверху
+
+server.py добавить:
+POST /api/edit/auto-orient        → PrintPreparation(mesh).auto_orient() → mesh_oriented.ply
+POST /api/edit/apply-transform    → numpy @ vertices (column-major 4×4) → mesh_oriented.ply
+GET  /api/result/oriented         → mesh_oriented.ply (fallback: mesh_repaired.ply)
+```
+
+> [!check] Тест: поворот мышью + [Применить] → меш сохраняется в нужной ориентации
+
+---
+
+### Промпт 11.D — Denoise
+
+```
+Режим 'denoise'. Изменить viewer.js и server.py.
+
+viewer.js:
+- Загрузить облако (GET /api/result/ply)
+- Shift + drag → SelectionBox (jsm/interactive/SelectionBox.js + SelectionHelper.js)
+- Выделенные точки → красный цвет, хранить selectedIndices[]
+- [Удалить] → POST /api/edit/delete-points {indices} → перезагрузить PLY
+- [Снять выделение] → вернуть исходные цвета
+- [Пересчитать меш] → POST /api/edit/remesh → SSE прогресс
+
+server.py добавить:
+POST /api/edit/delete-points {indices: [...]}
+  → numpy mask → estimate_normals(k=30) → сохранить point_cloud_clean.ply
+  → вернуть {ok, remaining: N}
+
+POST /api/edit/remesh
+  → _poisson_mesh + MeshRepair + pymeshfix в thread → SSE → mesh_repaired.ply
+```
+
+> [!check] Тест: выделить группу шумных точек → [Удалить] → облако чище
+
+---
+
+### Промпт 11.E — Repair
+
+```
+Режим 'repair'. Изменить viewer.js и server.py.
+
+viewer.js:
+- Загрузить меш (GET /api/result/oriented)
+- При входе: GET /api/edit/mesh-info → панель: "Вершин N | Граней N | Рёбра N | Watertight да/нет"
+- Если open_edges > 0: GET /api/result/boundary-edges → LineSegments красным поверх меша
+- [Закрыть дыры] → POST /api/edit/fill-holes → перезагрузить + обновить info
+- [Smooth] → POST /api/edit/smooth?iterations=3 → перезагрузить
+
+server.py добавить:
+GET  /api/edit/mesh-info          → {vertices, faces, open_edges, is_watertight, volume_mm3}
+GET  /api/result/boundary-edges   → {edges: [[x1,y1,z1,x2,y2,z2]...]} макс 10K рёбер
+POST /api/edit/fill-holes         → MeshRepair.repair_all() + pymeshfix → mesh_repaired.ply
+POST /api/edit/smooth?iterations= → repair_all(smooth_iterations=N, max_hole_edges=0)
+```
+
+> [!check] Тест: открытые рёбра видны красным, [Закрыть дыры] → watertight=да
+
+---
+
+### Промпт 11.F — Export
+
+```
+Кнопки экспорта в app.js и server.py.
+
+STL:
+- [Export STL] → диалог: height_mm (default 100), чекбокс add_base
+- POST /api/export/stl {height_mm, add_base} → Exporter.prepare_and_export()
+- GET  /api/export/download/stl → скачать файл (Content-Disposition: attachment)
+
+OBJ + текстура:
+- [OBJ+tex] → POST /api/export/obj-texture {images_dir} → SSE прогресс
+- GET  /api/export/download/obj → ZIP (model.obj + model.mtl + textures/)
+
+colmap_runner.py — новый метод texture_export(images_dir, workspace) → Path к ZIP:
+  1. colmap model_converter → TXT
+  2. colmap image_undistorter
+  3. colmap patch_match_stereo
+  4. colmap stereo_fusion
+  5. colmap texture_mapper → model.obj + textures/
+  6. zipfile.ZipFile → упаковать всё
+  Fallback если texture_mapper нет: trimesh.export(obj) без текстуры.
+```
+
+> [!check] Тест: STL скачивается, ZIP содержит .obj + .mtl + папку textures/
+
+---
+
+### Промпт 11.G — pywebview
+
+```
+pip install pywebview
+
+python/desktop.py:
+
+1. Запустить FastAPI в daemon-thread:
+   threading.Thread(target=uvicorn.run,
+     kwargs={"app": app, "host": "127.0.0.1", "port": 8765, "log_level": "error"},
+     daemon=True).start()
+
+2. Подождать сервер: poll GET /api/status, таймаут 10 сек
+
+3. Открыть окно:
+   webview.create_window("3D Scanner", "http://127.0.0.1:8765/",
+     width=1280, height=800, min_size=(800, 600), js_api=DesktopAPI())
+   webview.start()
+
+python/desktop_api.py — DesktopAPI:
+  def get_folder(self) -> str:
+    result = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
+    return result[0] if result else ""
+
+app.js — кнопка "Выбрать папку":
+  const path = await window.pywebview?.api?.get_folder()
+             ?? prompt("Путь к папке:")
+
+scripts/run_desktop.ps1:
+  .\venv\Scripts\Activate.ps1
+  python python\desktop.py
+
+Для отладки без окна: python python/api/run.py → браузер http://127.0.0.1:8765/
+```
+
+> [!check] Тест: `python python/desktop.py` → нативное окно Windows, кнопка папки работает
