@@ -323,6 +323,117 @@ class ColmapRunner:
             if f.is_file() and f.suffix.lower() in _IMAGE_EXTS
         )
 
+    # ── Texture export ───────────────────────────────────────────────────────────
+
+    def texture_export(
+        self,
+        images_dir: Path,
+        workspace: Path,
+        progress_callback=None,
+    ) -> Path:
+        """
+        Экспорт меша с текстурой через COLMAP texture_mapper.
+        Возвращает путь к ZIP (model.obj + model.mtl + textures/).
+        Fallback: trimesh OBJ без текстуры.
+        """
+        import zipfile
+
+        def _cb(step: str, progress: float) -> None:
+            if progress_callback:
+                progress_callback(step, progress)
+
+        dense_dir  = workspace / "dense"
+        sparse_dir = workspace / "sparse"
+        tex_dir    = workspace / "texture"
+        tex_dir.mkdir(exist_ok=True)
+
+        # Найти текущий меш (ориентированный → отремонтированный → исходный)
+        mesh_path: Path | None = None
+        for name in ("mesh_oriented.ply", "mesh_fixed.ply", "mesh_repaired.ply"):
+            p = workspace / "mesh" / name
+            if p.exists():
+                mesh_path = p
+                break
+        if mesh_path is None:
+            raise RuntimeError("Меш не найден в workspace — запустите сканирование")
+
+        try:
+            # Undistorter (если dense/images не готов)
+            if not (dense_dir / "images").exists():
+                model_dir = sparse_dir / "0"
+                if not model_dir.exists():
+                    raise RuntimeError("Sparse модель не найдена — запустите сканирование")
+                _cb("tex_undistort", 0.1)
+                dense_dir.mkdir(exist_ok=True)
+                self._run_cmd(
+                    "image_undistorter",
+                    "--image_path",  str(images_dir),
+                    "--input_path",  str(model_dir),
+                    "--output_path", str(dense_dir),
+                    "--output_type", "COLMAP",
+                )
+
+            # Patch-match stereo (если depth maps не готовы)
+            depth_dir = dense_dir / "stereo" / "depth_maps"
+            if not depth_dir.exists() or not any(depth_dir.glob("*.h5")):
+                _cb("tex_stereo", 0.3)
+                self._run_cmd(
+                    "patch_match_stereo",
+                    "--workspace_path",   str(dense_dir),
+                    "--workspace_format", "COLMAP",
+                    "--PatchMatchStereo.gpu_index", "0",
+                )
+
+            # Stereo fusion (если fused.ply не готов)
+            fused_ply = dense_dir / "fused.ply"
+            if not fused_ply.exists():
+                _cb("tex_fusion", 0.5)
+                self._run_cmd(
+                    "stereo_fusion",
+                    "--workspace_path",   str(dense_dir),
+                    "--workspace_format", "COLMAP",
+                    "--input_type",       "geometric",
+                    "--output_path",      str(fused_ply),
+                )
+
+            _cb("tex_map", 0.7)
+            self._run_cmd(
+                "texture_mapper",
+                "--workspace_path",   str(dense_dir),
+                "--workspace_format", "COLMAP",
+                "--input_mesh",       str(mesh_path),
+                "--output_path",      str(tex_dir),
+            )
+
+            if not list(tex_dir.glob("*.obj")):
+                raise RuntimeError("texture_mapper не создал .obj файл")
+
+        except Exception as exc:
+            logger.warning("COLMAP texture_mapper: %s — fallback trimesh OBJ", exc)
+            _cb("tex_fallback", 0.8)
+            self._export_obj_fallback(mesh_path, tex_dir)
+
+        _cb("tex_zip", 0.95)
+        zip_path = workspace / "texture_export.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in tex_dir.rglob("*"):
+                if f.is_file():
+                    zf.write(f, f.relative_to(tex_dir))
+
+        logger.info("texture_export → %s (%.1f MB)",
+                    zip_path.name, zip_path.stat().st_size / 1e6)
+        return zip_path
+
+    def _export_obj_fallback(self, mesh_path: Path, out_dir: Path) -> None:
+        """Fallback: экспорт OBJ без текстуры через trimesh."""
+        try:
+            import trimesh as tm
+            m = tm.load(str(mesh_path), force="mesh", process=False)
+            m.export(str(out_dir / "model.obj"))
+            logger.info("trimesh OBJ fallback → model.obj")
+        except Exception as exc:
+            raise RuntimeError(f"OBJ fallback failed: {exc}") from exc
+
     def _find_vocab_tree(self) -> Path | None:
         """Ищет файл vocab_tree рядом с COLMAP.bat."""
         colmap_dir = self.colmap_bat.parent

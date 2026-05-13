@@ -41,6 +41,7 @@ axesScene.add(new THREE.AxesHelper(0.8));
 // ── Состояние сцены ───────────────────────────────────────────────────────────
 let pointsObj     = null;
 let meshObj       = null;
+let edgesObj      = null;   // LineSegments — граничные рёбра (Repair mode)
 let transformCtrl = null;
 let currentMode   = 'view';
 
@@ -111,6 +112,14 @@ function _disposeObject(obj) {
 function _showLayer(layer) {
   if (pointsObj) pointsObj.visible = (layer === 'points');
   if (meshObj)   meshObj.visible   = (layer === 'mesh');
+}
+
+function _disposeEdges() {
+  if (!edgesObj) return;
+  scene.remove(edgesObj);
+  edgesObj.geometry?.dispose();
+  edgesObj.material?.dispose();
+  edgesObj = null;
 }
 
 const $ = (id) => document.getElementById(id);
@@ -427,16 +436,108 @@ function _setupDenoiseButtons() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// REPAIR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function _enterRepair() {
+  await _loadMesh('/api/result/oriented');
+  _disposeEdges();
+  _showLayer('mesh');
+
+  const infoEl = $('rpInfo');
+  infoEl.textContent = 'Загрузка...';
+
+  try {
+    const r = await fetch('/api/edit/mesh-info');
+    if (!r.ok) throw new Error(`mesh-info: ${r.status}`);
+    const info = await r.json();
+
+    const wt = info.is_watertight ? 'Да' : 'Нет';
+    infoEl.textContent =
+      `V:${info.vertices} F:${info.faces} | Дыры:${info.open_edges} | Watertight:${wt}`;
+
+    if (info.open_edges > 0) {
+      const er = await fetch('/api/result/boundary-edges');
+      if (er.ok) {
+        const { edges } = await er.json();
+        _showBoundaryEdges(edges);
+      }
+    }
+  } catch (e) {
+    infoEl.textContent = `Ошибка: ${e.message}`;
+  }
+
+  $('repair-tools').classList.add('visible');
+  _setupRepairButtons();
+}
+
+function _exitRepair() {
+  _disposeEdges();
+  $('repair-tools').classList.remove('visible');
+}
+
+function _showBoundaryEdges(edges) {
+  _disposeEdges();
+  if (!edges || edges.length === 0) return;
+
+  const positions = new Float32Array(edges.length * 6);
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    positions[i * 6]     = e[0]; positions[i * 6 + 1] = e[1]; positions[i * 6 + 2] = e[2];
+    positions[i * 6 + 3] = e[3]; positions[i * 6 + 4] = e[4]; positions[i * 6 + 5] = e[5];
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  edgesObj = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xff3333 }));
+  scene.add(edgesObj);
+}
+
+function _setupRepairButtons() {
+  $('rpFillHoles').onclick = async () => {
+    $('rpFillHoles').disabled = true;
+    $('rpFillHoles').textContent = '...';
+    try {
+      const r = await fetch('/api/edit/fill-holes', { method: 'POST' });
+      if (!r.ok) throw new Error(await r.text());
+      await _enterRepair();
+    } catch (e) {
+      $('rpInfo').textContent = `Ошибка: ${e.message}`;
+    } finally {
+      $('rpFillHoles').disabled = false;
+      $('rpFillHoles').textContent = 'Закрыть дыры';
+    }
+  };
+
+  $('rpSmooth').onclick = async () => {
+    $('rpSmooth').disabled = true;
+    $('rpSmooth').textContent = '...';
+    try {
+      const r = await fetch('/api/edit/smooth?iterations=3', { method: 'POST' });
+      if (!r.ok) throw new Error(await r.text());
+      await _enterRepair();
+    } catch (e) {
+      $('rpInfo').textContent = `Ошибка: ${e.message}`;
+    } finally {
+      $('rpSmooth').disabled = false;
+      $('rpSmooth').textContent = 'Smooth ×3';
+    }
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ПУБЛИЧНЫЙ API
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export function setMode(mode) {
   if (currentMode === 'orient'  && mode !== 'orient')  _exitOrient();
   if (currentMode === 'denoise' && mode !== 'denoise') _exitDenoise();
+  if (currentMode === 'repair'  && mode !== 'repair')  _exitRepair();
 
   currentMode = mode;
 
   if      (mode === 'orient')  _enterOrient();
   else if (mode === 'denoise') _enterDenoise();
+  else if (mode === 'repair')  _enterRepair();
   else if (mode === 'view')    _showLayer('points');
 }

@@ -65,6 +65,91 @@
 
 ---
 
+## 2026-05-13 — Фазы 11.E–11.F + SQLite история сканов + тесты
+
+### Фаза 11.E — Repair mode
+
+**`viewer.js`:**
+- `_enterRepair()` загружает меш (`GET /api/result/oriented`), делает `GET /api/edit/mesh-info`
+- Тулбар показывает: `V:N F:N | Дыры:N | Watertight:Да/Нет`
+- Если `open_edges > 0` — `GET /api/result/boundary-edges` → `THREE.LineSegments` красным поверх меша (до 10K рёбер)
+- `[Закрыть дыры]` → `POST /api/edit/fill-holes` → перезаходит в repair-режим, обновляет инфо
+- `[Smooth ×3]` → `POST /api/edit/smooth?iterations=3` → аналогично
+- `_exitRepair()` → `_disposeEdges()` (удаляет LineSegments из сцены)
+
+**`server.py` (4 новых эндпоинта):**
+- `GET /api/edit/mesh-info` — trimesh вычисляет V/F/open_edges/is_watertight через `np.unique(edges_sorted, axis=0)`, volume из `m.volume`
+- `GET /api/result/boundary-edges` — те же граничные рёбра как `[[x1,y1,z1,x2,y2,z2]...]`, лимит 10K
+- `POST /api/edit/fill-holes` — `trimesh.repair.fill_holes` + pymeshfix → сохраняет поверх `mesh_oriented.ply`
+- `POST /api/edit/smooth` — `trimesh.smoothing.filter_laplacian` → сохраняет поверх `mesh_oriented.ply`
+
+Ключевое решение: fill-holes и smooth сохраняют результат в `mesh_oriented.ply`, а не в новый файл — `_current_mesh_path()` всегда находит его первым и цепочка orient→repair работает корректно.
+
+### Фаза 11.F — Экспорт STL и OBJ+текстура
+
+**STL:**
+- `[Export STL]` → открывает `<dialog>` с полем высоты (мм) и чекбоксом «Подставка»
+- `POST /api/export/stl {height_mm, add_base}` → `Exporter.prepare_and_export()` с `auto_orient=False` (пользователь уже ориентировал) → синхронный, сохраняет в `data/results/export_ts.stl`
+- `GET /api/export/download/stl` → `FileResponse` с `Content-Disposition: attachment`
+- Браузер получает скачивание через временный `<a>` элемент
+
+**OBJ + текстура:**
+- `[OBJ+tex]` → POST + SSE прогресс (отдельный `/api/export/stream`)
+- `colmap_runner.py` новый метод `texture_export(images_dir, workspace, cb)`:
+  - Пропускает шаги если результаты уже есть (file-based idempotency: `dense/images/`, `stereo/depth_maps/*.h5`, `dense/fused.ply`)
+  - Запускает `colmap texture_mapper --input_mesh mesh_oriented.ply --output_path texture/`
+  - Fallback: `trimesh.export(model.obj)` без текстуры если texture_mapper недоступен
+  - Упаковывает всё в `texture_export.zip`
+- `GET /api/export/download/obj` → ZIP-файл
+- Отдельный `_export_state` с Lock, не смешивается со `_state` скана
+
+**Диалог STL:** нативный `<dialog>` HTML5, тёмная тема через CSS-переменные.
+
+### SQLite история сканов
+
+**Проблема:** `_state` в памяти → рестарт сервера = всё забыто, кнопки экспорта не работают, `images_dir` для OBJ неизвестен.
+
+**Решение:** `python/api/db.py` — обёртка над `sqlite3` (stdlib, без зависимостей).
+
+Схема таблицы `scans`: `id, name, created_at, images_dir, workspace, ply_path, mesh_path, status, n_images, elapsed_sec, error_msg`.
+
+**server.py изменения:**
+- `_state` расширен: `images_dir` (для OBJ-экспорта) и `scan_id` (FK в БД)
+- При старте модуля: `init_db()` → `get_last_done_scan()` → если PLY на диске существует — восстанавливает состояние, разблокирует UI
+- Тест-переопределение через `SCANNER_DB` env-var (установить до импорта)
+- `scan_start`: создаёт запись `status=running`, передаёт `scan_id` в поток
+- `_pipeline_thread`: обновляет запись на `done` (с `workspace, ply_path, mesh_path, elapsed_sec`) или `error`
+- Новые эндпоинты: `GET /api/scans`, `POST /api/scans/{id}/load`, `DELETE /api/scans/{id}`
+
+**Загрузка старого скана:** `POST /api/scans/{id}/load` → проверяет PLY на диске → обновляет `_state` → вьюер подгружает облако без пересчёта COLMAP.
+
+**UI (История сканов):**
+- Секция в левой панели, сворачивается кликом
+- Кликабельные карточки (только `status=done`), активная карточка подсвечена
+- При загрузке: автозаполняет `folderPath` (для OBJ-экспорта), вызывает `loadPLY`
+- При старте страницы: восстанавливает состояние из `/api/status` автоматически
+
+### Тесты
+
+`python/tests/test_db.py` — 20 unit-тестов на чистый CRUD:
+- init (idempotent), insert (returns id, default status), get (fields, nonexistent), update (done/error/noop), get_all (empty, DESC order), get_last_done (none, ignores errors, newest), delete
+
+`python/tests/test_server_load.py` — 13 интеграционных тестов через `fastapi.testclient.TestClient`:
+- `GET /api/scans`: пустой список, вставленный скан виден, порядок DESC
+- `POST /api/scans/{id}/load`: 404 несуществующий, 400 неправильный статус, 404 PLY на диске нет, 200 успех + state обновлён + images_dir в ответе
+- `DELETE /api/scans/{id}`: удаление, 404, не трогает другие записи
+
+Результат: **33/33 passed** (0.7 сек).
+
+`pip install httpx` добавлен в зависимости (нужен для TestClient).
+
+### Следующие шаги
+
+- **11.G pywebview** — нативное окно без браузера, `get_folder()` диалог
+- **Финальное тестирование** — прогон с реальными фото, проверка полного UX
+
+---
+
 ## 2026-05-13 — Десктоп приложение: FastAPI + Three.js UI (фазы 11.A–11.D)
 
 ### Что сделано

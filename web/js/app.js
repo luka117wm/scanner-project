@@ -14,7 +14,8 @@ const toolBtns      = document.querySelectorAll('.tool-btn');
 const exportStl     = document.getElementById('exportStl');
 const exportObj     = document.getElementById('exportObj');
 
-let eventSource = null;
+let eventSource  = null;
+let _activeScanId = null;
 
 // ── Выбор папки ────────────────────────────────────────────────────────────────
 folderBtn.addEventListener('click', async () => {
@@ -88,7 +89,13 @@ function connectSSE() {
       addLog('Загружаю облако точек...');
       document.dispatchEvent(new CustomEvent('remesh-done'));
       loadPLY('/api/result/ply')
-        .then(() => addLog('Готово'))
+        .then(async () => {
+          addLog('Готово');
+          const st = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
+          _activeScanId = st.scan_id ?? null;
+          if (st.images_dir) folderPath.value = st.images_dir;
+          await loadHistory();
+        })
         .catch((err) => addLog(`Ошибка загрузки PLY: ${err.message}`));
     } else if (data.status === 'error') {
       close_sse();
@@ -129,15 +136,181 @@ document.addEventListener('remesh-done', () => {
   if (btn) btn.disabled = false;
 });
 
-exportStl.addEventListener('click', () => {
-  // Реализация в фазе 11.F
-  console.log('[app] export STL');
+// ── Экспорт STL ────────────────────────────────────────────────────────────────
+const stlDialog = document.getElementById('stlDialog');
+
+exportStl.addEventListener('click', () => stlDialog.showModal());
+
+document.getElementById('dlgCancel').addEventListener('click', () => stlDialog.close());
+
+document.getElementById('dlgExport').addEventListener('click', async () => {
+  const height_mm = parseFloat(document.getElementById('dlgHeight').value) || 100;
+  const add_base  = document.getElementById('dlgBase').checked;
+  stlDialog.close();
+
+  exportStl.disabled = true;
+  addLog('Генерация STL...');
+  try {
+    const r = await fetch('/api/export/stl', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ height_mm, add_base }),
+    });
+    if (!r.ok) {
+      const b = await r.json().catch(() => ({}));
+      throw new Error(b.detail ?? `HTTP ${r.status}`);
+    }
+    addLog('Скачивание model.stl...');
+    _triggerDownload('/api/export/download/stl', 'model.stl');
+  } catch (err) {
+    addLog(`Ошибка STL: ${err.message}`);
+  } finally {
+    exportStl.disabled = false;
+  }
 });
 
-exportObj.addEventListener('click', () => {
-  // Реализация в фазе 11.F
-  console.log('[app] export OBJ+tex');
+// ── Экспорт OBJ + текстура ────────────────────────────────────────────────────
+let exportSrc = null;
+
+exportObj.addEventListener('click', async () => {
+  const imagesDir = folderPath.value.trim();
+  if (!imagesDir) { addLog('Укажите папку с фотографиями'); return; }
+
+  exportObj.disabled = true;
+  addLog('Запуск текстурирования...');
+  try {
+    const r = await fetch('/api/export/obj-texture', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ images_dir: imagesDir }),
+    });
+    if (r.status === 409) { addLog('Текстурирование уже запущено'); exportObj.disabled = false; return; }
+    if (!r.ok) {
+      const b = await r.json().catch(() => ({}));
+      throw new Error(b.detail ?? `HTTP ${r.status}`);
+    }
+    _connectExportSSE();
+  } catch (err) {
+    addLog(`Ошибка OBJ: ${err.message}`);
+    exportObj.disabled = false;
+  }
 });
+
+const _EXPORT_LABELS = {
+  tex_undistort: 'Undistort',
+  tex_stereo:    'Стерео-глубина',
+  tex_fusion:    'Слияние',
+  tex_map:       'Маппинг текстуры',
+  tex_fallback:  'OBJ (без текстуры)',
+  tex_zip:       'Упаковка ZIP',
+  done:          'Готово',
+};
+
+function _connectExportSSE() {
+  if (exportSrc) exportSrc.close();
+  exportSrc = new EventSource('/api/export/stream');
+
+  exportSrc.onmessage = (e) => {
+    const d     = JSON.parse(e.data);
+    const pct   = Math.round((d.progress ?? 0) * 100);
+    const label = _EXPORT_LABELS[d.step] ?? d.step;
+    if (label) addLog(`${label}${pct ? ' ' + pct + '%' : ''}`);
+
+    if (d.status === 'done') {
+      _closeExportSSE();
+      addLog('Скачивание texture_export.zip...');
+      _triggerDownload('/api/export/download/obj', 'texture_export.zip');
+      exportObj.disabled = false;
+    } else if (d.status === 'error') {
+      _closeExportSSE();
+      addLog(`Ошибка текстуры: ${d.error ?? 'unknown'}`);
+      exportObj.disabled = false;
+    }
+  };
+
+  exportSrc.onerror = () => {
+    _closeExportSSE();
+    addLog('Соединение экспорта прервано');
+    exportObj.disabled = false;
+  };
+}
+
+function _closeExportSSE() {
+  if (exportSrc) { exportSrc.close(); exportSrc = null; }
+}
+
+function _triggerDownload(url, filename) {
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ── История сканов ─────────────────────────────────────────────────────────────
+async function loadHistory() {
+  const list = document.getElementById('historyList');
+  try {
+    const scans = await fetch('/api/scans').then(r => r.json());
+    if (!scans.length) {
+      list.innerHTML = '<div class="scan-item-empty">Нет сканов</div>';
+      return;
+    }
+    list.innerHTML = scans.map(s => {
+      const active = s.id === _activeScanId ? ' active' : '';
+      const date   = s.created_at ? s.created_at.slice(5, 16).replace('T', ' ') : '';
+      const photos = s.n_images   ? `${s.n_images} фото` : '';
+      const meta   = [photos, date].filter(Boolean).join(' · ');
+      return `<div class="scan-item ${s.status}${active}" data-id="${s.id}">
+        <div class="scan-item-name">${s.name}</div>
+        <div class="scan-item-meta">${meta}</div>
+      </div>`;
+    }).join('');
+
+    list.querySelectorAll('.scan-item.done').forEach(el => {
+      el.addEventListener('click', () => _loadScan(parseInt(el.dataset.id)));
+    });
+  } catch { /* сервер недоступен */ }
+}
+
+async function _loadScan(id) {
+  const r = await fetch(`/api/scans/${id}/load`, { method: 'POST' });
+  if (!r.ok) { addLog('Не удалось загрузить скан'); return; }
+  const data = await r.json();
+  if (data.images_dir) folderPath.value = data.images_dir;
+  _activeScanId = id;
+  setUIState('done');
+  addLog('Загрузка облака...');
+  try {
+    await loadPLY('/api/result/ply?' + Date.now());
+    addLog('Готово');
+    await loadHistory();
+  } catch (e) { addLog(`Ошибка PLY: ${e.message}`); }
+}
+
+// Переключение секции истории
+document.getElementById('historyToggle').addEventListener('click', () => {
+  const list = document.getElementById('historyList');
+  const tog  = document.getElementById('historyToggle');
+  const open = list.style.display !== 'none';
+  list.style.display = open ? 'none' : '';
+  tog.textContent = (open ? 'История сканов ▸' : 'История сканов ▾');
+});
+
+// Загрузить историю при старте + восстановить activeScanId из текущего статуса
+(async () => {
+  try {
+    const st = await fetch('/api/status').then(r => r.json());
+    _activeScanId = st.scan_id ?? null;
+    if (st.images_dir) folderPath.value = st.images_dir;
+    if (st.status === 'done') {
+      setUIState('done');
+      addLog('Загрузка облака...');
+      await loadPLY('/api/result/ply?' + Date.now());
+      addLog('Готово');
+    }
+  } catch { /* сервер недоступен */ }
+  await loadHistory();
+})();
 
 // ── Вспомогательные ────────────────────────────────────────────────────────────
 const STEP_LABELS = {
