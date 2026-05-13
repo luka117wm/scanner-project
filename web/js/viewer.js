@@ -26,12 +26,9 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 
 // Освещение для меша
-scene.add(
-  new THREE.AmbientLight(0xffffff, 0.4),
-  Object.assign(new THREE.DirectionalLight(0xffffff, 0.8), {
-    position: new THREE.Vector3(0.5, 1, 0.5).normalize(),
-  })
-);
+const _dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+_dirLight.position.set(0.5, 1, 0.5).normalize();
+scene.add(new THREE.AmbientLight(0xffffff, 0.4), _dirLight);
 
 // ── Мини-сцена осей ────────────────────────────────────────────────────────────
 const axesScene  = new THREE.Scene();
