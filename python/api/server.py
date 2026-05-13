@@ -350,7 +350,6 @@ def apply_transform(body: TransformBody):
         v_new = (M @ np.hstack([v, ones]).T).T[:, :3]
 
         result = tm.Trimesh(vertices=v_new, faces=f, process=False)
-        result.compute_vertex_normals()
 
         out = mesh_path.parent / "mesh_oriented.ply"
         result.export(str(out))
@@ -726,9 +725,8 @@ def fill_holes():
             np.array(m.vertices, dtype=np.float64),
             np.array(m.faces,    dtype=np.int32),
         )
-        mf.repair(verbose=False)
+        mf.repair()
         result = tm.Trimesh(vertices=mf.v, faces=mf.f, process=False)
-        result.compute_vertex_normals()
 
         out = mesh_path.parent / "mesh_oriented.ply"
         result.export(str(out))
