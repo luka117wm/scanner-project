@@ -59,7 +59,7 @@ def main() -> None:
         height=800,
         min_size=(800, 600),
     )
-    webview.start()
+    webview.start(debug=True)  # F12 открывает DevTools
 
 
 if __name__ == "__main__":
