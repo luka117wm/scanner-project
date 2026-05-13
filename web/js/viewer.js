@@ -173,6 +173,7 @@ async function _loadMesh(url) {
 
 async function _enterOrient() {
   const mesh = await _loadMesh('/api/result/oriented');
+  if (currentMode !== 'orient') return;   // режим сменился пока грузился меш
   _showLayer('mesh');
 
   if (!transformCtrl) {
@@ -438,6 +439,7 @@ function _setupDenoiseButtons() {
 
 async function _enterRepair() {
   await _loadMesh('/api/result/oriented');
+  if (currentMode !== 'repair') return;   // режим сменился пока грузился меш
   _disposeEdges();
   _showLayer('mesh');
 

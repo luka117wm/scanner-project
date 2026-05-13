@@ -301,7 +301,7 @@ document.getElementById('historyToggle').addEventListener('click', () => {
   tog.textContent = (open ? 'История сканов ▸' : 'История сканов ▾');
 });
 
-// ── Лог сервера ────────────────────────────────────────────────────────────────
+// ── Лог пайплайна ────────────────────────────────────────────────────────────────
 
 let _serverLogTimer = null;
 
@@ -322,12 +322,12 @@ document.getElementById('serverLogToggle').addEventListener('click', () => {
   const open = el.style.display !== 'none';
   if (open) {
     el.style.display = 'none';
-    tog.textContent  = 'Лог сервера ▸';
+    tog.textContent  = 'Лог пайплайна ▸';
     clearInterval(_serverLogTimer);
     _serverLogTimer = null;
   } else {
     el.style.display = '';
-    tog.textContent  = 'Лог сервера ▾';
+    tog.textContent  = 'Лог пайплайна ▾';
     refreshServerLog();
     _serverLogTimer = setInterval(refreshServerLog, 3000);
   }

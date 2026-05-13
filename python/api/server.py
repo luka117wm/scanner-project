@@ -21,13 +21,17 @@ _DATA_DIR     = _PROJECT_ROOT / "data" / "results"
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Файл-лог ──────────────────────────────────────────────────────────────────
-_log_path = _DATA_DIR / f"server_{time.strftime('%Y%m%d_%H%M%S')}.log"
+_log_path = _DATA_DIR / f"pipeline_{time.strftime('%Y%m%d_%H%M%S')}.log"
 _fh = logging.FileHandler(_log_path, encoding="utf-8")
 _fh.setLevel(logging.DEBUG)
 _fh.setFormatter(logging.Formatter(
     "%(asctime)s %(levelname)-8s %(name)s: %(message)s", datefmt="%H:%M:%S"
 ))
-logging.getLogger().addHandler(_fh)
+_root = logging.getLogger()
+_root.addHandler(_fh)
+_root.setLevel(logging.DEBUG)
+# Убрать шум uvicorn access-лога из файла (запросы к /api/...)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ── Глобальный state ───────────────────────────────────────────────────────────
@@ -421,6 +425,13 @@ def _remesh_thread(ply_path: Path) -> None:
     try:
         workspace = ply_path.parent
         repaired  = MeshProcessor(ScanConfig()).process_cloud(ply_path, workspace)
+
+        # Удалить старый mesh_oriented.ply — иначе _current_mesh_path()
+        # всегда вернёт его вместо нового mesh_fixed.ply
+        oriented_old = repaired.parent / "mesh_oriented.ply"
+        if oriented_old.exists():
+            oriented_old.unlink()
+            logger.info("Deleted stale mesh_oriented.ply")
 
         new_clean = workspace / "point_cloud_clean.ply"
         _put(
