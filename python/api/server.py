@@ -332,20 +332,27 @@ def apply_transform(body: TransformBody):
     except ImportError:
         raise HTTPException(500, "trimesh not installed")
 
-    loaded = tm.load(str(mesh_path), force="mesh", process=False)
-    v = np.asarray(loaded.vertices, dtype=np.float64)
-    f = np.asarray(loaded.faces,    dtype=np.int32)
+    try:
+        loaded = tm.load(str(mesh_path), force="mesh", process=False)
+        v = np.asarray(loaded.vertices, dtype=np.float64)
+        f = np.asarray(loaded.faces,    dtype=np.int32)
 
-    # Three.js column-major → правильная 4×4 матрица трансформации
-    M = np.array(body.matrix, dtype=np.float64).reshape(4, 4).T
-    ones = np.ones((len(v), 1), dtype=np.float64)
-    v_new = (M @ np.hstack([v, ones]).T).T[:, :3]
+        if len(f) == 0:
+            raise ValueError(f"Mesh has no faces: {mesh_path}")
 
-    result = tm.Trimesh(vertices=v_new, faces=f, process=False)
-    result.compute_vertex_normals()
+        # Three.js column-major → правильная 4×4 матрица трансформации
+        M = np.array(body.matrix, dtype=np.float64).reshape(4, 4).T
+        ones = np.ones((len(v), 1), dtype=np.float64)
+        v_new = (M @ np.hstack([v, ones]).T).T[:, :3]
 
-    out = mesh_path.parent / "mesh_oriented.ply"
-    result.export(str(out))
+        result = tm.Trimesh(vertices=v_new, faces=f, process=False)
+        result.compute_vertex_normals()
+
+        out = mesh_path.parent / "mesh_oriented.ply"
+        result.export(str(out))
+    except Exception as exc:
+        logger.exception("apply_transform error (mesh=%s)", mesh_path)
+        raise HTTPException(500, str(exc))
 
     logger.info("apply_transform → %s (%d verts)", out.name, len(v_new))
     return {"ok": True}
@@ -697,19 +704,26 @@ def fill_holes():
     if not mesh_path:
         raise HTTPException(404, "No mesh available")
 
-    m = tm.load(str(mesh_path), force="mesh", process=False)
-    tm.repair.fill_holes(m)
+    try:
+        m = tm.load(str(mesh_path), force="mesh", process=False)
+        if len(m.faces) == 0:
+            raise ValueError(f"Mesh has no faces: {mesh_path}")
 
-    mf = pymeshfix.MeshFix(
-        np.array(m.vertices, dtype=np.float64),
-        np.array(m.faces,    dtype=np.int32),
-    )
-    mf.repair(verbose=False)
-    result = tm.Trimesh(vertices=mf.v, faces=mf.f, process=False)
-    result.compute_vertex_normals()
+        tm.repair.fill_holes(m)
 
-    out = mesh_path.parent / "mesh_oriented.ply"
-    result.export(str(out))
+        mf = pymeshfix.MeshFix(
+            np.array(m.vertices, dtype=np.float64),
+            np.array(m.faces,    dtype=np.int32),
+        )
+        mf.repair(verbose=False)
+        result = tm.Trimesh(vertices=mf.v, faces=mf.f, process=False)
+        result.compute_vertex_normals()
+
+        out = mesh_path.parent / "mesh_oriented.ply"
+        result.export(str(out))
+    except Exception as exc:
+        logger.exception("fill_holes error (mesh=%s)", mesh_path)
+        raise HTTPException(500, str(exc))
 
     logger.info("fill_holes → %s (%d faces)", out.name, len(result.faces))
     return {"ok": True, "faces": len(result.faces)}
@@ -727,11 +741,16 @@ def smooth_mesh(iterations: int = 3):
     if not mesh_path:
         raise HTTPException(404, "No mesh available")
 
-    m = tm.load(str(mesh_path), force="mesh", process=False)
-    tm.smoothing.filter_laplacian(m, iterations=iterations)
-
-    out = mesh_path.parent / "mesh_oriented.ply"
-    m.export(str(out))
+    try:
+        m = tm.load(str(mesh_path), force="mesh", process=False)
+        if len(m.faces) == 0:
+            raise ValueError(f"Mesh has no faces: {mesh_path}")
+        tm.smoothing.filter_laplacian(m, iterations=iterations)
+        out = mesh_path.parent / "mesh_oriented.ply"
+        m.export(str(out))
+    except Exception as exc:
+        logger.exception("smooth error (mesh=%s)", mesh_path)
+        raise HTTPException(500, str(exc))
 
     logger.info("smooth → %s (%d iters)", out.name, iterations)
     return {"ok": True}

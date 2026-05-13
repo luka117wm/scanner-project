@@ -128,9 +128,9 @@ export async function loadPLY(url) {
 
   const hasColor = !!geometry.attributes.color;
   const mat = new THREE.PointsMaterial({
-    vertexColors: hasColor,
-    color:        hasColor ? undefined : 0xffffff,
-    size:         0.002,
+    vertexColors:    hasColor,
+    ...(hasColor ? {} : { color: 0xffffff }),
+    size:            0.002,
     sizeAttenuation: true,
   });
 
