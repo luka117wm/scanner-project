@@ -208,6 +208,17 @@ def delete_scan_endpoint(scan_id: int):
     return {"ok": True}
 
 
+@app.get("/api/logs")
+def get_server_logs(n: int = 300):
+    """Последние N строк из лог-файла сервера."""
+    try:
+        text  = _log_path.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        return {"lines": lines[-n:], "file": _log_path.name}
+    except Exception:
+        return {"lines": [], "file": ""}
+
+
 @app.get("/api/scan/stream")
 async def scan_stream():
     """SSE: шлёт {step, progress, status} каждые 0.5 сек до done/error."""

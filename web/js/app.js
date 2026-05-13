@@ -18,15 +18,20 @@ let eventSource  = null;
 let _activeScanId = null;
 
 // ── Выбор папки ────────────────────────────────────────────────────────────────
+
+// pywebview инжектирует API асинхронно — ждём события готовности
+let _pywebviewReady = !!window.pywebview?.api;
+window.addEventListener('pywebviewready', () => { _pywebviewReady = true; });
+
 folderBtn.addEventListener('click', async () => {
-  // pywebview даёт нативный диалог (фаза 11.G)
-  if (window.pywebview?.api?.get_folder) {
+  if (_pywebviewReady && window.pywebview?.api?.get_folder) {
     const path = await window.pywebview.api.get_folder();
     if (path) folderPath.value = path;
   } else {
-    // В браузере — просто фокус на поле, пользователь вводит путь вручную
-    folderPath.focus();
-    folderPath.select();
+    // Браузер: нативный prompt
+    const cur  = folderPath.value;
+    const path = prompt('Путь к папке с фотографиями:', cur);
+    if (path !== null && path.trim()) folderPath.value = path.trim();
   }
 });
 
@@ -296,6 +301,38 @@ document.getElementById('historyToggle').addEventListener('click', () => {
   tog.textContent = (open ? 'История сканов ▸' : 'История сканов ▾');
 });
 
+// ── Лог сервера ────────────────────────────────────────────────────────────────
+
+let _serverLogTimer = null;
+
+async function refreshServerLog() {
+  const el = document.getElementById('serverLog');
+  if (!el || el.style.display === 'none') return;
+  try {
+    const { lines } = await fetch('/api/logs?n=300').then(r => r.json());
+    const atBottom  = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    el.textContent  = lines.join('\n');
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  } catch { /* сервер недоступен */ }
+}
+
+document.getElementById('serverLogToggle').addEventListener('click', () => {
+  const el  = document.getElementById('serverLog');
+  const tog = document.getElementById('serverLogToggle');
+  const open = el.style.display !== 'none';
+  if (open) {
+    el.style.display = 'none';
+    tog.textContent  = 'Лог сервера ▸';
+    clearInterval(_serverLogTimer);
+    _serverLogTimer = null;
+  } else {
+    el.style.display = '';
+    tog.textContent  = 'Лог сервера ▾';
+    refreshServerLog();
+    _serverLogTimer = setInterval(refreshServerLog, 3000);
+  }
+});
+
 // Загрузить историю при старте + восстановить activeScanId из текущего статуса
 (async () => {
   try {
@@ -331,10 +368,12 @@ function updateProgress(value, step) {
 }
 
 function addLog(msg) {
+  const ts    = new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const lines = (logEl.textContent || '').split('\n').filter(Boolean);
-  lines.push(msg);
-  if (lines.length > 5) lines.splice(0, lines.length - 5);
+  lines.push(`[${ts}] ${msg}`);
+  if (lines.length > 20) lines.splice(0, lines.length - 20);
   logEl.textContent = lines.join('\n');
+  logEl.scrollTop   = logEl.scrollHeight;
 }
 
 function setUIState(state) {
