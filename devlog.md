@@ -5,6 +5,51 @@
 
 ---
 
+## 2026-05-13 — Фаза 11.G: нативное окно pywebview
+
+### Новые файлы
+
+**`python/desktop.py`** — точка входа нативного приложения:
+- Запускает FastAPI (`api.server.app`) в daemon-thread через `uvicorn.run`
+- Ждёт готовности сервера: поллинг `GET /api/status` с таймаутом 10 сек
+- Открывает окно `webview.create_window("3D Scanner", "http://127.0.0.1:8765/", js_api=DesktopAPI(), width=1280, height=800, min_size=(800, 600))`
+
+**`python/desktop_api.py`** — JS-API объект:
+- `get_folder()` → `webview.windows[0].create_file_dialog(FOLDER_DIALOG)` → нативный диалог выбора папки
+
+**`scripts/run_desktop.ps1`** — PowerShell-скрипт запуска:
+- Активирует venv, запускает `python python\desktop.py`
+
+### Интеграция с UI
+
+`app.js` кнопка «Выбрать папку» уже реализована (из фазы 11.G):
+```javascript
+if (window.pywebview?.api?.get_folder) {
+    const path = await window.pywebview.api.get_folder();
+    if (path) folderPath.value = path;
+} else {
+    folderPath.focus(); folderPath.select();  // fallback в браузере
+}
+```
+
+### Зависимости
+
+`pip install pywebview` — установлен pywebview 6.2.1 (pythonnet, cffi, bottle).
+
+На Windows использует WebView2 (Chromium Edge), не требует внешнего браузера.
+
+### Режимы работы
+
+- **Нативное окно:** `python python\desktop.py` или `.\scripts\run_desktop.ps1`
+- **Браузер (отладка):** `python python\api\run.py` → `http://localhost:8765/`
+
+### Следующие шаги
+
+- Финальное тестирование с реальными фото
+- Проверка полного UX: съёмка → pipeline → просмотр → export STL
+
+---
+
 ## 2026-05-05 — tst5 (200 фото), ROR, фиксы пайплайна, новая архитектура
 
 ### Тестирование tst5
