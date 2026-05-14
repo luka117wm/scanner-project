@@ -99,7 +99,8 @@ def _find_mesh(workspace: Path) -> Path | None:
     return None
 
 
-def _pipeline_thread(images_dir: Path, output_path: Path, scan_id: int) -> None:
+def _pipeline_thread(images_dir: Path, output_path: Path, scan_id: int,
+                     quality: str = "medium") -> None:
     """Запускается в daemon-потоке: полный пайплайн сканирования."""
     import sys
     sys.path.insert(0, str(_PROJECT_ROOT / "python"))
@@ -111,8 +112,9 @@ def _pipeline_thread(images_dir: Path, output_path: Path, scan_id: int) -> None:
         _put(step=step, progress=progress)
 
     try:
-        result = ScanPipeline(ScanConfig()).scan(
-            images_dir, output_path, progress_callback=_cb
+        cfg = ScanConfig(**_QUALITY_PRESETS.get(quality, {}))
+        result = ScanPipeline(cfg).scan(
+            images_dir, output_path, progress_callback=_cb,
         )
         ws        = result.workspace
         ply_path  = ws / "mesh" / "point_cloud_clean.ply"
@@ -146,6 +148,15 @@ def _pipeline_thread(images_dir: Path, output_path: Path, scan_id: int) -> None:
 
 class StartBody(BaseModel):
     images_dir: str
+    quality: str = "medium"   # low | medium | high
+
+
+# Карта качества → параметры ScanConfig
+_QUALITY_PRESETS: dict[str, dict] = {
+    "low":    {"poisson_depth": 7},
+    "medium": {"poisson_depth": 9},
+    "high":   {"poisson_depth": 11},
+}
 
 
 @app.post("/api/scan/start")
@@ -157,6 +168,7 @@ def scan_start(body: StartBody):
     if not images_dir.exists():
         raise HTTPException(400, f"Directory not found: {images_dir}")
 
+    quality = body.quality if body.quality in _QUALITY_PRESETS else "medium"
     ts          = time.strftime("%Y%m%d_%H%M%S")
     output_path = _DATA_DIR / f"scan_{ts}.stl"
     scan_id     = _db_insert(name=f"scan_{ts}", images_dir=str(images_dir))
@@ -167,11 +179,11 @@ def scan_start(body: StartBody):
 
     threading.Thread(
         target=_pipeline_thread,
-        args=(images_dir, output_path, scan_id),
+        args=(images_dir, output_path, scan_id, quality),
         daemon=True,
     ).start()
 
-    logger.info("Pipeline started: %s (scan_id=%d)", images_dir, scan_id)
+    logger.info("Pipeline started: %s (scan_id=%d, quality=%s)", images_dir, scan_id, quality)
     return {"ok": True}
 
 
@@ -423,7 +435,9 @@ def _remesh_thread(ply_path: Path) -> None:
 
     try:
         workspace = ply_path.parent
-        repaired  = MeshProcessor(ScanConfig()).process_cloud(ply_path, workspace)
+        repaired  = MeshProcessor(ScanConfig()).process_cloud(
+            ply_path, workspace, skip_noise_removal=True
+        )
 
         # Удалить старый mesh_oriented.ply — иначе _current_mesh_path()
         # всегда вернёт его вместо нового mesh_fixed.ply

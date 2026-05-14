@@ -1,25 +1,107 @@
 /**
- * app.js — логика UI: выбор папки, запуск сканирования, SSE прогресс, инструменты.
+ * app.js — логика UI: тема, качество, папка, сканирование, SSE прогресс, экспорт.
  */
-import { loadPLY, setMode } from './viewer.js';
+import { loadPLY, setMode, setViewMode, fitCamera } from './viewer.js';
 
 // ── UI-элементы ────────────────────────────────────────────────────────────────
 const folderPath    = document.getElementById('folderPath');
 const folderBtn     = document.getElementById('folderBtn');
 const startBtn      = document.getElementById('startBtn');
+const startLabel    = document.getElementById('startLabel');
 const progressFill  = document.getElementById('progressFill');
 const progressLabel = document.getElementById('progressLabel');
+const progressPct   = document.getElementById('progressPct');
 const logEl         = document.getElementById('log');
 const toolBtns      = document.querySelectorAll('.tool-btn');
 const exportStl     = document.getElementById('exportStl');
 const exportObj     = document.getElementById('exportObj');
+const stlDialog     = document.getElementById('stlDialog');
 
-let eventSource  = null;
+let eventSource   = null;
 let _activeScanId = null;
+let _selectedQ    = 'medium';
+
+// ── Тема ───────────────────────────────────────────────────────────────────────
+document.getElementById('themeSeg').querySelectorAll('button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('themeSeg').querySelectorAll('button').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    document.documentElement.dataset.theme = btn.dataset.themeSet;
+  });
+});
+
+// ── Режим просмотра (topbar) ───────────────────────────────────────────────────
+document.getElementById('viewSeg').querySelectorAll('button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('viewSeg').querySelectorAll('button').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    setViewMode(btn.dataset.view);
+  });
+});
+
+// ── Кнопки вьюпорта ───────────────────────────────────────────────────────────
+document.getElementById('vt-fit').addEventListener('click', fitCamera);
+
+// ── Качество ───────────────────────────────────────────────────────────────────
+document.getElementById('qualitySelector').querySelectorAll('.q-card').forEach(card => {
+  card.addEventListener('click', () => {
+    document.getElementById('qualitySelector').querySelectorAll('.q-card').forEach(c => c.classList.remove('on'));
+    card.classList.add('on');
+    _selectedQ = card.dataset.q;
+  });
+});
+
+// ── Правая панель — табы ───────────────────────────────────────────────────────
+let _logPolling = null;
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('on'));
+    tab.classList.add('on');
+    const panel = document.querySelector(`.tab-panel[data-panel="${tab.dataset.tab}"]`);
+    if (panel) panel.classList.add('on');
+
+    if (tab.dataset.tab === 'log') {
+      refreshServerLog();
+      if (!_logPolling) _logPolling = setInterval(refreshServerLog, 3000);
+    } else {
+      clearInterval(_logPolling);
+      _logPolling = null;
+    }
+  });
+});
+
+// ── Фильтр лога ────────────────────────────────────────────────────────────────
+let _logLines = [];
+document.getElementById('logFilter').addEventListener('input', (e) => {
+  _renderServerLog(e.target.value.trim());
+});
+
+async function refreshServerLog() {
+  const el = document.getElementById('serverLog');
+  if (!el) return;
+  const panel = el.closest('.tab-panel');
+  if (!panel?.classList.contains('on')) return;
+  try {
+    const { lines } = await fetch('/api/logs?n=400').then(r => r.json());
+    _logLines = lines;
+    _renderServerLog(document.getElementById('logFilter')?.value?.trim() ?? '');
+  } catch { /* недоступен */ }
+}
+
+function _renderServerLog(filter) {
+  const el = document.getElementById('serverLog');
+  if (!el) return;
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  const shown = filter
+    ? _logLines.filter(l => l.toLowerCase().includes(filter.toLowerCase()))
+    : _logLines;
+  el.textContent = shown.join('\n');
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
 
 // ── Выбор папки ────────────────────────────────────────────────────────────────
-
-// pywebview инжектирует API асинхронно — ждём события готовности
 let _pywebviewReady = !!window.pywebview?.api;
 window.addEventListener('pywebviewready', () => { _pywebviewReady = true; });
 
@@ -28,44 +110,33 @@ folderBtn.addEventListener('click', async () => {
     const path = await window.pywebview.api.get_folder();
     if (path) folderPath.value = path;
   } else {
-    // Браузер: нативный prompt
-    const cur  = folderPath.value;
-    const path = prompt('Путь к папке с фотографиями:', cur);
+    const path = prompt('Путь к папке с фотографиями:', folderPath.value);
     if (path !== null && path.trim()) folderPath.value = path.trim();
   }
 });
 
-// Enter в поле пути → старт
-folderPath.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') startBtn.click();
-});
+folderPath.addEventListener('keydown', (e) => { if (e.key === 'Enter') startBtn.click(); });
 
 // ── Запуск сканирования ────────────────────────────────────────────────────────
 startBtn.addEventListener('click', () => {
   const dir = folderPath.value.trim();
-  if (!dir) {
-    addLog('Укажите путь к папке с фотографиями');
-    return;
-  }
+  if (!dir) { addLog('Укажите путь к папке с фотографиями'); return; }
   startScan(dir);
 });
 
 async function startScan(imagesDir) {
   setUIState('scanning');
+  _resetStages();
   addLog('Подключение...');
 
   try {
     const resp = await fetch('/api/scan/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ images_dir: imagesDir }),
+      body: JSON.stringify({ images_dir: imagesDir, quality: _selectedQ }),
     });
 
-    if (resp.status === 409) {
-      addLog('Пайплайн уже запущен');
-      setUIState('idle');
-      return;
-    }
+    if (resp.status === 409) { addLog('Пайплайн уже запущен'); setUIState('idle'); return; }
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
       throw new Error(body.detail ?? `HTTP ${resp.status}`);
@@ -87,6 +158,7 @@ function connectSSE() {
   eventSource.onmessage = (e) => {
     const data = JSON.parse(e.data);
     updateProgress(data.progress ?? 0, data.step ?? '');
+    _updateStages(data.step, data.progress);
 
     if (data.status === 'done') {
       close_sse();
@@ -99,6 +171,8 @@ function connectSSE() {
           const st = await fetch('/api/status').then(r => r.json()).catch(() => ({}));
           _activeScanId = st.scan_id ?? null;
           if (st.images_dir) folderPath.value = st.images_dir;
+          _setStatus('done', `Скан #${_activeScanId ?? '?'}`);
+          _markAllStagesDone();
           await loadHistory();
         })
         .catch((err) => addLog(`Ошибка загрузки PLY: ${err.message}`));
@@ -106,6 +180,7 @@ function connectSSE() {
       close_sse();
       addLog(`Ошибка: ${data.error ?? 'unknown'}`);
       setUIState('idle');
+      _setStatus('error', 'Ошибка пайплайна');
     }
   };
 
@@ -123,29 +198,23 @@ function close_sse() {
 // ── Кнопки инструментов ────────────────────────────────────────────────────────
 toolBtns.forEach((btn) => {
   btn.addEventListener('click', () => {
-    toolBtns.forEach((b) => b.classList.remove('active'));
+    toolBtns.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     setMode(btn.dataset.mode);
   });
 });
 
-// Remesh — перезапускаем SSE когда viewer сигналит о старте
 document.addEventListener('remesh-started', () => {
   setUIState('scanning');
   connectSSE();
 });
-
-// Когда после remesh SSE приходит done — разблокируем кнопку Пересчитать
 document.addEventListener('remesh-done', () => {
   const btn = document.getElementById('dnRemesh');
   if (btn) btn.disabled = false;
 });
 
 // ── Экспорт STL ────────────────────────────────────────────────────────────────
-const stlDialog = document.getElementById('stlDialog');
-
 exportStl.addEventListener('click', () => stlDialog.showModal());
-
 document.getElementById('dlgCancel').addEventListener('click', () => stlDialog.close());
 
 document.getElementById('dlgExport').addEventListener('click', async () => {
@@ -157,14 +226,11 @@ document.getElementById('dlgExport').addEventListener('click', async () => {
   addLog('Генерация STL...');
   try {
     const r = await fetch('/api/export/stl', {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ height_mm, add_base }),
+      body: JSON.stringify({ height_mm, add_base }),
     });
-    if (!r.ok) {
-      const b = await r.json().catch(() => ({}));
-      throw new Error(b.detail ?? `HTTP ${r.status}`);
-    }
+    if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.detail ?? `HTTP ${r.status}`); }
     addLog('Скачивание model.stl...');
     _triggerDownload('/api/export/download/stl', 'model.stl');
   } catch (err) {
@@ -174,7 +240,7 @@ document.getElementById('dlgExport').addEventListener('click', async () => {
   }
 });
 
-// ── Экспорт OBJ + текстура ────────────────────────────────────────────────────
+// ── Экспорт OBJ ────────────────────────────────────────────────────────────────
 let exportSrc = null;
 
 exportObj.addEventListener('click', async () => {
@@ -185,15 +251,12 @@ exportObj.addEventListener('click', async () => {
   addLog('Запуск текстурирования...');
   try {
     const r = await fetch('/api/export/obj-texture', {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ images_dir: imagesDir }),
+      body: JSON.stringify({ images_dir: imagesDir }),
     });
     if (r.status === 409) { addLog('Текстурирование уже запущено'); exportObj.disabled = false; return; }
-    if (!r.ok) {
-      const b = await r.json().catch(() => ({}));
-      throw new Error(b.detail ?? `HTTP ${r.status}`);
-    }
+    if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.detail ?? `HTTP ${r.status}`); }
     _connectExportSSE();
   } catch (err) {
     addLog(`Ошибка OBJ: ${err.message}`);
@@ -202,25 +265,19 @@ exportObj.addEventListener('click', async () => {
 });
 
 const _EXPORT_LABELS = {
-  tex_undistort: 'Undistort',
-  tex_stereo:    'Стерео-глубина',
-  tex_fusion:    'Слияние',
-  tex_map:       'Маппинг текстуры',
-  tex_fallback:  'OBJ (без текстуры)',
-  tex_zip:       'Упаковка ZIP',
-  done:          'Готово',
+  tex_undistort: 'Undistort', tex_stereo: 'Стерео-глубина',
+  tex_fusion: 'Слияние',     tex_map: 'Маппинг текстуры',
+  tex_fallback: 'OBJ (без текстуры)', tex_zip: 'Упаковка ZIP', done: 'Готово',
 };
 
 function _connectExportSSE() {
   if (exportSrc) exportSrc.close();
   exportSrc = new EventSource('/api/export/stream');
-
   exportSrc.onmessage = (e) => {
-    const d     = JSON.parse(e.data);
-    const pct   = Math.round((d.progress ?? 0) * 100);
+    const d = JSON.parse(e.data);
+    const pct = Math.round((d.progress ?? 0) * 100);
     const label = _EXPORT_LABELS[d.step] ?? d.step;
     if (label) addLog(`${label}${pct ? ' ' + pct + '%' : ''}`);
-
     if (d.status === 'done') {
       _closeExportSSE();
       addLog('Скачивание texture_export.zip...');
@@ -232,17 +289,9 @@ function _connectExportSSE() {
       exportObj.disabled = false;
     }
   };
-
-  exportSrc.onerror = () => {
-    _closeExportSSE();
-    addLog('Соединение экспорта прервано');
-    exportObj.disabled = false;
-  };
+  exportSrc.onerror = () => { _closeExportSSE(); addLog('Соединение экспорта прервано'); exportObj.disabled = false; };
 }
-
-function _closeExportSSE() {
-  if (exportSrc) { exportSrc.close(); exportSrc = null; }
-}
+function _closeExportSSE() { if (exportSrc) { exportSrc.close(); exportSrc = null; } }
 
 function _triggerDownload(url, filename) {
   const a = Object.assign(document.createElement('a'), { href: url, download: filename });
@@ -256,22 +305,34 @@ async function loadHistory() {
   const list = document.getElementById('historyList');
   try {
     const scans = await fetch('/api/scans').then(r => r.json());
+
+    const countEl = document.getElementById('historyCount');
+    if (countEl) countEl.textContent = scans.length;
+
     if (!scans.length) {
-      list.innerHTML = '<div class="scan-item-empty">Нет сканов</div>';
+      list.innerHTML = '<div class="scan-empty">Нет сканов</div>';
       return;
     }
+
     list.innerHTML = scans.map(s => {
       const active = s.id === _activeScanId ? ' active' : '';
       const date   = s.created_at ? s.created_at.slice(5, 16).replace('T', ' ') : '';
       const photos = s.n_images   ? `${s.n_images} фото` : '';
       const meta   = [photos, date].filter(Boolean).join(' · ');
-      return `<div class="scan-item ${s.status}${active}" data-id="${s.id}">
-        <div class="scan-item-name">${s.name}</div>
-        <div class="scan-item-meta">${meta}</div>
+      const statusClass = s.status === 'done' ? 'ok' : s.status === 'error' ? 'fail' : '';
+      const statusText  = s.status === 'done' ? 'DONE' : s.status === 'error' ? 'FAIL' : s.status;
+
+      return `<div class="scan-card${s.status === 'done' ? '' : ' undone'}${active}" data-id="${s.id}">
+        <div class="scan-thumb"></div>
+        <div>
+          <div class="scan-name">${s.name}</div>
+          <div class="scan-meta">${meta}</div>
+        </div>
+        <span class="scan-status ${statusClass}">${statusText}</span>
       </div>`;
     }).join('');
 
-    list.querySelectorAll('.scan-item.done').forEach(el => {
+    list.querySelectorAll('.scan-card:not(.undone)').forEach(el => {
       el.addEventListener('click', () => _loadScan(parseInt(el.dataset.id)));
     });
   } catch { /* сервер недоступен */ }
@@ -285,6 +346,7 @@ async function _loadScan(id) {
   _activeScanId = id;
   setUIState('done');
   addLog('Загрузка облака...');
+  _setStatus('done', `Скан #${id}`);
   try {
     await loadPLY('/api/result/ply?' + Date.now());
     addLog('Готово');
@@ -292,62 +354,65 @@ async function _loadScan(id) {
   } catch (e) { addLog(`Ошибка PLY: ${e.message}`); }
 }
 
-// Переключение секции истории
-document.getElementById('historyToggle').addEventListener('click', () => {
-  const list = document.getElementById('historyList');
-  const tog  = document.getElementById('historyToggle');
-  const open = list.style.display !== 'none';
-  list.style.display = open ? 'none' : '';
-  tog.textContent = (open ? 'История сканов ▸' : 'История сканов ▾');
-});
+// ── Stages helpers ─────────────────────────────────────────────────────────────
+const _STAGE_MAP = {
+  extract_frames: 'stg-extract',
+  colmap:         'stg-colmap',
+  point_cloud:    'stg-colmap',
+  poisson:        'stg-mesh',
+  mesh_repair:    'stg-mesh',
+  print_prep:     'stg-mesh',
+  export:         'stg-export',
+  done:           'stg-export',
+};
 
-// ── Лог пайплайна ────────────────────────────────────────────────────────────────
+let _activeStage = null;
 
-let _serverLogTimer = null;
-
-async function refreshServerLog() {
-  const el = document.getElementById('serverLog');
-  if (!el || el.style.display === 'none') return;
-  try {
-    const { lines } = await fetch('/api/logs?n=300').then(r => r.json());
-    const atBottom  = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-    el.textContent  = lines.join('\n');
-    if (atBottom) el.scrollTop = el.scrollHeight;
-  } catch { /* сервер недоступен */ }
+function _resetStages() {
+  document.querySelectorAll('.stage-row').forEach(row => {
+    row.className = 'stage-row';
+    const pct = row.querySelector('.stage-pct');
+    if (pct) pct.textContent = '—';
+  });
+  _activeStage = null;
 }
 
-document.getElementById('serverLogToggle').addEventListener('click', () => {
-  const el  = document.getElementById('serverLog');
-  const tog = document.getElementById('serverLogToggle');
-  const open = el.style.display !== 'none';
-  if (open) {
-    el.style.display = 'none';
-    tog.textContent  = 'Лог пайплайна ▸';
-    clearInterval(_serverLogTimer);
-    _serverLogTimer = null;
-  } else {
-    el.style.display = '';
-    tog.textContent  = 'Лог пайплайна ▾';
-    refreshServerLog();
-    _serverLogTimer = setInterval(refreshServerLog, 3000);
-  }
-});
+function _updateStages(step, progress) {
+  const stageId = _STAGE_MAP[step];
+  if (!stageId) return;
 
-// Загрузить историю при старте + восстановить activeScanId из текущего статуса
-(async () => {
-  try {
-    const st = await fetch('/api/status').then(r => r.json());
-    _activeScanId = st.scan_id ?? null;
-    if (st.images_dir) folderPath.value = st.images_dir;
-    if (st.status === 'done') {
-      setUIState('done');
-      addLog('Загрузка облака...');
-      await loadPLY('/api/result/ply?' + Date.now());
-      addLog('Готово');
-    }
-  } catch { /* сервер недоступен */ }
-  await loadHistory();
-})();
+  const stageEl = document.getElementById(stageId);
+  if (!stageEl) return;
+
+  if (_activeStage && _activeStage !== stageId) {
+    const prev = document.getElementById(_activeStage);
+    if (prev) { prev.className = 'stage-row s-done'; const p = prev.querySelector('.stage-pct'); if (p) p.textContent = '100%'; }
+  }
+
+  _activeStage = stageId;
+  stageEl.className = 'stage-row s-now';
+  const pct = stageEl.querySelector('.stage-pct');
+  if (pct) pct.textContent = step === 'done' ? '100%' : Math.round(progress * 100) + '%';
+}
+
+function _markAllStagesDone() {
+  document.querySelectorAll('.stage-row').forEach(row => {
+    row.className = 'stage-row s-done';
+    const p = row.querySelector('.stage-pct'); if (p) p.textContent = '100%';
+  });
+}
+
+// ── Statusbar ──────────────────────────────────────────────────────────────────
+function _setStatus(state, text) {
+  const dot  = document.getElementById('statusDot');
+  const span = document.getElementById('statusText');
+  if (dot) {
+    dot.className = 'status-dot';
+    if (state === 'running') dot.classList.add('running');
+    if (state === 'error')   dot.classList.add('error');
+  }
+  if (span) span.textContent = text ?? 'Готов';
+}
 
 // ── Вспомогательные ────────────────────────────────────────────────────────────
 const STEP_LABELS = {
@@ -362,9 +427,11 @@ const STEP_LABELS = {
 };
 
 function updateProgress(value, step) {
-  progressFill.style.width = `${Math.round(value * 100)}%`;
+  const pct = Math.round(value * 100);
+  progressFill.style.width = `${pct}%`;
   const label = STEP_LABELS[step] ?? step;
-  progressLabel.textContent = label ? `${label} — ${Math.round(value * 100)}%` : '—';
+  progressLabel.textContent = label || '—';
+  progressPct.textContent   = label ? `${pct}%` : '';
 }
 
 function addLog(msg) {
@@ -380,12 +447,33 @@ function setUIState(state) {
   const scanning = state === 'scanning';
   const done     = state === 'done';
 
-  startBtn.disabled    = scanning;
-  startBtn.textContent = scanning ? 'Обработка...' : 'Начать сканирование';
+  startBtn.disabled = scanning;
+  startBtn.classList.toggle('idle', !scanning);
+  startLabel.textContent = scanning ? 'Обработка...' : 'Начать сканирование';
 
-  toolBtns.forEach((b) => { b.disabled = !done; });
+  toolBtns.forEach(b => { b.disabled = !done; });
   exportStl.disabled = !done;
   exportObj.disabled = !done;
 
   if (!scanning) updateProgress(0, '');
+
+  if (scanning) _setStatus('running', 'Обработка...');
+  else if (!done) _setStatus('idle', 'Готов');
 }
+
+// ── Инициализация ──────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    const st = await fetch('/api/status').then(r => r.json());
+    _activeScanId = st.scan_id ?? null;
+    if (st.images_dir) folderPath.value = st.images_dir;
+    if (st.status === 'done') {
+      setUIState('done');
+      _setStatus('done', `Скан #${_activeScanId ?? '?'}`);
+      addLog('Загрузка облака...');
+      await loadPLY('/api/result/ply?' + Date.now());
+      addLog('Готово');
+    }
+  } catch { /* сервер недоступен */ }
+  await loadHistory();
+})();

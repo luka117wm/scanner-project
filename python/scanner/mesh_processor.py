@@ -29,10 +29,14 @@ class MeshProcessor:
     def __init__(self, config: ScanConfig) -> None:
         self.config = config
 
-    def process_cloud(self, ply_path: Path, workspace: Path) -> Path:
+    def process_cloud(self, ply_path: Path, workspace: Path,
+                      skip_noise_removal: bool = False) -> Path:
         """
         Облако точек → отремонтированный меш.
         Возвращает путь к repaired_mesh.ply в workspace.
+
+        skip_noise_removal=True: пропустить ROR и DBSCAN — используется при
+        remesh после ручного denoise, когда пользователь уже почистил облако.
         """
         from scanner import MeshRepair, PointCloud, TriangleMesh
 
@@ -52,37 +56,44 @@ class MeshProcessor:
         )
         logger.info("  SOR: %d -> %d pts", before, pc.size())
 
-        # Шаг 2b: Radius Outlier Removal — scatter-шум (трава, листья, одиночки)
-        # Пропускаем для разреженных облаков (<500K): маленький eps → удаляет
-        # настоящие точки объекта из-за низкой плотности (low quality COLMAP).
         eps = self._estimate_dbscan_eps(pc)
-        if pc.size() >= 500_000:
-            ror_radius = eps * self.config.ror_radius_factor
-            before = pc.size()
-            pc = self._radius_outlier_removal(pc, radius=ror_radius,
-                                              nb_points=self.config.ror_nb_points)
-            logger.info("  ROR: %d -> %d pts (r=%.5f=eps*%.1f, min_nb=%d)",
-                        before, pc.size(), ror_radius,
-                        self.config.ror_radius_factor, self.config.ror_nb_points)
+
+        if skip_noise_removal:
+            # После ручного denoise облако уже почищено — ROR и DBSCAN только
+            # навредят: они режут точки у границ удалённых зон (ложные outliers).
+            logger.info("  ROR: skipped (manual denoise mode)")
+            logger.info("  DBSCAN: skipped (manual denoise mode)")
         else:
-            logger.info("  ROR: skipped (sparse cloud %d pts < 500K)", pc.size())
+            # Шаг 2b: Radius Outlier Removal — scatter-шум (трава, листья, одиночки)
+            # Пропускаем для разреженных облаков (<500K): маленький eps → удаляет
+            # настоящие точки объекта из-за низкой плотности (low quality COLMAP).
+            if pc.size() >= 500_000:
+                ror_radius = eps * self.config.ror_radius_factor
+                before = pc.size()
+                pc = self._radius_outlier_removal(pc, radius=ror_radius,
+                                                  nb_points=self.config.ror_nb_points)
+                logger.info("  ROR: %d -> %d pts (r=%.5f=eps*%.1f, min_nb=%d)",
+                            before, pc.size(), ror_radius,
+                            self.config.ror_radius_factor, self.config.ror_nb_points)
+            else:
+                logger.info("  ROR: skipped (sparse cloud %d pts < 500K)", pc.size())
 
-        # Шаг 2c: удалить доминирующую плоскость (стол) перед DBSCAN
-        if self.config.remove_ground_plane:
-            self._remove_ground_plane(pc)
+            # Шаг 2c: удалить доминирующую плоскость (стол) перед DBSCAN
+            if self.config.remove_ground_plane:
+                self._remove_ground_plane(pc)
 
-        # Шаг 3: DBSCAN — наибольший кластер, eps адаптивный
-        before = pc.size()
-        logger.info("  DBSCAN eps=%.5f (auto), min_pts=%d",
-                    eps, self.config.dbscan_min_pts)
-        pc = pc.segment_largest_cluster(
-            eps=eps,
-            min_points=self.config.dbscan_min_pts,
-            min_cluster_fraction=self.config.dbscan_min_cluster_fraction,
-        )
-        logger.info("  DBSCAN: %d -> %d pts (kept %.1f%%, clusters>=%.0f%% of largest)",
-                    before, pc.size(), 100.0 * pc.size() / max(before, 1),
-                    self.config.dbscan_min_cluster_fraction * 100)
+            # Шаг 3: DBSCAN — наибольший кластер, eps адаптивный
+            before = pc.size()
+            logger.info("  DBSCAN eps=%.5f (auto), min_pts=%d",
+                        eps, self.config.dbscan_min_pts)
+            pc = pc.segment_largest_cluster(
+                eps=eps,
+                min_points=self.config.dbscan_min_pts,
+                min_cluster_fraction=self.config.dbscan_min_cluster_fraction,
+            )
+            logger.info("  DBSCAN: %d -> %d pts (kept %.1f%%, clusters>=%.0f%% of largest)",
+                        before, pc.size(), 100.0 * pc.size() / max(before, 1),
+                        self.config.dbscan_min_cluster_fraction * 100)
 
         # Шаг 4: Voxel downsample — только для очень больших облаков (>5M)
         # COLMAP poisson_mesher справляется с 1-3M точек напрямую
