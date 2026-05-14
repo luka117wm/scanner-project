@@ -153,9 +153,9 @@ class StartBody(BaseModel):
 
 # Карта качества → параметры ScanConfig
 _QUALITY_PRESETS: dict[str, dict] = {
-    "low":    {"poisson_depth": 7},
-    "medium": {"poisson_depth": 9},
-    "high":   {"poisson_depth": 11},
+    "low":    {"colmap_quality": "low",    "poisson_depth": 7},
+    "medium": {"colmap_quality": "medium", "poisson_depth": 9},
+    "high":   {"colmap_quality": "high",   "poisson_depth": 11},
 }
 
 
