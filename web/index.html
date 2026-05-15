@@ -93,6 +93,9 @@
             </svg>
           </button>
         </div>
+        <!-- Photo preview strip -->
+        <div id="photoStrip" class="photo-strip" style="display:none"></div>
+        <div id="photoMeta" class="photo-meta" style="display:none"></div>
       </section>
 
       <!-- Quality -->
@@ -102,17 +105,17 @@
           <button class="q-card" data-q="low">
             <div class="q-bars"><i></i><i></i><i></i></div>
             <div class="q-name">Low</div>
-            <div class="q-sub">~15 мин<br>depth 7</div>
+            <div class="q-sub">~30 мин<br>depth 7</div>
           </button>
           <button class="q-card on" data-q="medium">
             <div class="q-bars"><i></i><i></i><i></i></div>
             <div class="q-name">Medium</div>
-            <div class="q-sub">~40 мин<br>depth 9</div>
+            <div class="q-sub">~90 мин<br>depth 9</div>
           </button>
           <button class="q-card" data-q="high">
             <div class="q-bars"><i></i><i></i><i></i></div>
             <div class="q-name">High</div>
-            <div class="q-sub">~90 мин<br>depth 11</div>
+            <div class="q-sub">~3 часа<br>depth 11</div>
           </button>
         </div>
       </section>
@@ -187,8 +190,8 @@
           </button>
           <button id="exportObj" class="export-row" disabled>
             <span class="ext-badge">.OBJ</span>
-            <span>Mesh + текстура</span>
-            <span class="export-meta">+ материал</span>
+            <span>Меш</span>
+            <span class="export-meta">geometry only</span>
           </button>
         </div>
       </section>
@@ -212,10 +215,10 @@
 
     <!-- Viewport toolbar (top-left) -->
     <div class="viewport-toolbar">
-      <button class="icon-btn on" id="vt-orbit" title="Орбита (ЛКМ)">
+      <button class="icon-btn" id="vt-orbit" title="Сбросить камеру (Home)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <ellipse cx="12" cy="12" rx="10" ry="4"/>
-          <ellipse cx="12" cy="12" rx="4" ry="10"/>
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+          <path d="M3 3v5h5"/>
         </svg>
       </button>
       <button class="icon-btn" id="vt-fit" title="По размеру (F)">
@@ -225,8 +228,9 @@
       </button>
     </div>
 
-    <!-- View cube (top-right) -->
-    <div class="vcube" title="Ориентация камеры">
+    <!-- View cube (top-right) — click to cycle preset views -->
+    <div class="vcube" id="vcube" title="Нажмите для смены вида">
+      <span class="vcube-label" id="vcubeLabel">Persp</span>
       <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" opacity="0.7">
         <path d="M12 3 3 8v8l9 5 9-5V8z"/>
         <path d="M3 8l9 5 9-5"/><path d="M12 13v8"/>

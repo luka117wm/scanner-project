@@ -1,7 +1,7 @@
 /**
  * app.js — логика UI: тема, качество, папка, сканирование, SSE прогресс, экспорт.
  */
-import { loadPLY, setMode, setViewMode, fitCamera } from './viewer.js';
+import { loadPLY, setMode, setViewMode, fitCamera, resetCamera, snapView } from './viewer.js';
 
 // ── UI-элементы ────────────────────────────────────────────────────────────────
 const folderPath    = document.getElementById('folderPath');
@@ -41,6 +41,32 @@ document.getElementById('viewSeg').querySelectorAll('button').forEach(btn => {
 
 // ── Кнопки вьюпорта ───────────────────────────────────────────────────────────
 document.getElementById('vt-fit').addEventListener('click', fitCamera);
+document.getElementById('vt-orbit').addEventListener('click', resetCamera);
+
+// ── View cube — cycle preset views ────────────────────────────────────────────
+const _VCUBE_VIEWS = [
+  { key: 'persp', label: 'Persp' },
+  { key: 'front', label: 'Front' },
+  { key: 'right', label: 'Right' },
+  { key: 'top',   label: 'Top'   },
+  { key: 'back',  label: 'Back'  },
+  { key: 'left',  label: 'Left'  },
+];
+let _vcubeIdx = 0;
+
+document.getElementById('vcube')?.addEventListener('click', () => {
+  _vcubeIdx = (_vcubeIdx + 1) % _VCUBE_VIEWS.length;
+  const v = _VCUBE_VIEWS[_vcubeIdx];
+  snapView(v.key);
+  const lbl = document.getElementById('vcubeLabel');
+  if (lbl) lbl.textContent = v.label;
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'f' || e.key === 'F') fitCamera();
+  if (e.key === 'Home') resetCamera();
+});
 
 // ── Качество ───────────────────────────────────────────────────────────────────
 document.getElementById('qualitySelector').querySelectorAll('.q-card').forEach(card => {
@@ -108,14 +134,47 @@ window.addEventListener('pywebviewready', () => { _pywebviewReady = true; });
 folderBtn.addEventListener('click', async () => {
   if (_pywebviewReady && window.pywebview?.api?.get_folder) {
     const path = await window.pywebview.api.get_folder();
-    if (path) folderPath.value = path;
+    if (path) { folderPath.value = path; loadPhotoStrip(path); }
   } else {
     const path = prompt('Путь к папке с фотографиями:', folderPath.value);
-    if (path !== null && path.trim()) folderPath.value = path.trim();
+    if (path !== null && path.trim()) { folderPath.value = path.trim(); loadPhotoStrip(path.trim()); }
   }
 });
 
 folderPath.addEventListener('keydown', (e) => { if (e.key === 'Enter') startBtn.click(); });
+folderPath.addEventListener('change', () => {
+  const p = folderPath.value.trim();
+  if (p) loadPhotoStrip(p);
+});
+
+// ── Превью фотографий ─────────────────────────────────────────────────────────
+async function loadPhotoStrip(dir) {
+  const strip = document.getElementById('photoStrip');
+  const meta  = document.getElementById('photoMeta');
+  if (!strip || !meta) return;
+  strip.innerHTML = '';
+  strip.style.display = 'none';
+  meta.style.display = 'none';
+  try {
+    const r = await fetch(`/api/photos?dir=${encodeURIComponent(dir)}`);
+    if (!r.ok) return;
+    const { files, total } = await r.json();
+    if (!files || files.length === 0) return;
+    files.forEach(name => {
+      const img = document.createElement('img');
+      img.src = `/api/photos/file?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`;
+      img.alt = name;
+      img.title = name;
+      img.loading = 'lazy';
+      strip.appendChild(img);
+    });
+    strip.style.display = 'flex';
+    meta.textContent = total > files.length
+      ? `${total} фото (показано ${files.length})`
+      : `${total} фото`;
+    meta.style.display = 'block';
+  } catch { /* нет соединения с сервером */ }
+}
 
 // ── Запуск сканирования ────────────────────────────────────────────────────────
 startBtn.addEventListener('click', () => {
@@ -342,7 +401,7 @@ async function _loadScan(id) {
   const r = await fetch(`/api/scans/${id}/load`, { method: 'POST' });
   if (!r.ok) { addLog('Не удалось загрузить скан'); return; }
   const data = await r.json();
-  if (data.images_dir) folderPath.value = data.images_dir;
+  if (data.images_dir) { folderPath.value = data.images_dir; loadPhotoStrip(data.images_dir); }
   _activeScanId = id;
   setUIState('done');
   addLog('Загрузка облака...');
@@ -466,7 +525,10 @@ function setUIState(state) {
   try {
     const st = await fetch('/api/status').then(r => r.json());
     _activeScanId = st.scan_id ?? null;
-    if (st.images_dir) folderPath.value = st.images_dir;
+    if (st.images_dir) {
+      folderPath.value = st.images_dir;
+      loadPhotoStrip(st.images_dir);
+    }
     if (st.status === 'done') {
       setUIState('done');
       _setStatus('done', `Скан #${_activeScanId ?? '?'}`);

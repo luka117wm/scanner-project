@@ -172,6 +172,35 @@ export function fitCamera() {
   if (obj) _fitCameraToObject(obj);
 }
 
+export function resetCamera() {
+  camera.position.set(0, 0, 2);
+  controls.target.set(0, 0, 0);
+  controls.update();
+}
+
+export function snapView(view) {
+  const obj = meshObj || pointsObj;
+  let center = new THREE.Vector3();
+  let dist = 2;
+  if (obj) {
+    const box = new THREE.Box3().setFromObject(obj);
+    box.getCenter(center);
+    dist = box.getSize(new THREE.Vector3()).length() * 1.6;
+  }
+  const cx = center.x, cy = center.y, cz = center.z;
+  const pos = {
+    front:  new THREE.Vector3(cx,       cy,       cz + dist),
+    back:   new THREE.Vector3(cx,       cy,       cz - dist),
+    right:  new THREE.Vector3(cx + dist, cy,      cz),
+    left:   new THREE.Vector3(cx - dist, cy,      cz),
+    top:    new THREE.Vector3(cx,  cy + dist,      cz),
+    persp:  new THREE.Vector3(cx + dist * 0.7, cy + dist * 0.5, cz + dist * 0.7),
+  }[view] ?? new THREE.Vector3(cx, cy, cz + dist);
+  camera.position.copy(pos);
+  controls.target.copy(center);
+  controls.update();
+}
+
 function _disposeObject(obj) {
   if (!obj) return;
   scene.remove(obj);

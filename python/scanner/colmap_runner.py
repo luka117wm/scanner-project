@@ -342,10 +342,21 @@ class ColmapRunner:
             if progress_callback:
                 progress_callback(step, progress)
 
-        dense_dir  = workspace / "dense"
-        sparse_dir = workspace / "sparse"
+        # Pipeline кладёт данные в workspace/colmap/; legacy-путь — workspace/
+        colmap_ws  = workspace / "colmap"
         tex_dir    = workspace / "texture"
         tex_dir.mkdir(exist_ok=True)
+
+        # Найти sparse model: pipeline → colmap/sparse/0, legacy → sparse/0
+        model_dir: Path | None = None
+        for candidate in [colmap_ws / "sparse" / "0", workspace / "sparse" / "0"]:
+            if candidate.exists():
+                model_dir = candidate
+                break
+
+        # Найти dense dir: предпочесть уже готовый из pipeline, иначе создать новый
+        colmap_dense = colmap_ws / "dense"
+        dense_dir = colmap_dense if (colmap_dense / "images").exists() else workspace / "dense"
 
         # Найти текущий меш (ориентированный → отремонтированный → исходный)
         mesh_path: Path | None = None
@@ -358,12 +369,12 @@ class ColmapRunner:
             raise RuntimeError("Меш не найден в workspace — запустите сканирование")
 
         try:
-            # Undistorter (если dense/images не готов)
+            # Undistorter — нужен только camera poses + undistorted images;
+            # patch_match_stereo / stereo_fusion texture_mapper не нужны.
             if not (dense_dir / "images").exists():
-                model_dir = sparse_dir / "0"
-                if not model_dir.exists():
+                if model_dir is None:
                     raise RuntimeError("Sparse модель не найдена — запустите сканирование")
-                _cb("tex_undistort", 0.1)
+                _cb("tex_undistort", 0.2)
                 dense_dir.mkdir(exist_ok=True)
                 self._run_cmd(
                     "image_undistorter",
@@ -372,31 +383,10 @@ class ColmapRunner:
                     "--output_path", str(dense_dir),
                     "--output_type", "COLMAP",
                 )
+            else:
+                _cb("tex_undistort", 0.2)
 
-            # Patch-match stereo (если depth maps не готовы)
-            depth_dir = dense_dir / "stereo" / "depth_maps"
-            if not depth_dir.exists() or not any(depth_dir.glob("*.h5")):
-                _cb("tex_stereo", 0.3)
-                self._run_cmd(
-                    "patch_match_stereo",
-                    "--workspace_path",   str(dense_dir),
-                    "--workspace_format", "COLMAP",
-                    "--PatchMatchStereo.gpu_index", "0",
-                )
-
-            # Stereo fusion (если fused.ply не готов)
-            fused_ply = dense_dir / "fused.ply"
-            if not fused_ply.exists():
-                _cb("tex_fusion", 0.5)
-                self._run_cmd(
-                    "stereo_fusion",
-                    "--workspace_path",   str(dense_dir),
-                    "--workspace_format", "COLMAP",
-                    "--input_type",       "geometric",
-                    "--output_path",      str(fused_ply),
-                )
-
-            _cb("tex_map", 0.7)
+            _cb("tex_map", 0.6)
             self._run_cmd(
                 "texture_mapper",
                 "--workspace_path",   str(dense_dir),

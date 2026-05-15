@@ -779,6 +779,34 @@ def smooth_mesh(iterations: int = 3):
     return {"ok": True}
 
 
+# ── Photos preview ────────────────────────────────────────────────────────────
+
+_IMAGE_PREVIEW_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+
+@app.get("/api/photos")
+def list_photos(dir: str):
+    folder = Path(dir)
+    if not folder.exists() or not folder.is_dir():
+        raise HTTPException(400, "Invalid directory")
+    files = sorted(
+        f.name for f in folder.iterdir()
+        if f.is_file() and f.suffix.lower() in _IMAGE_PREVIEW_EXTS
+    )
+    return {"files": files[:40], "total": len(files)}
+
+
+@app.get("/api/photos/file")
+def serve_photo(dir: str, name: str):
+    folder = Path(dir).resolve()
+    file_path = (folder / name).resolve()
+    if not str(file_path).startswith(str(folder)):
+        raise HTTPException(403, "Path traversal not allowed")
+    if not file_path.exists() or file_path.suffix.lower() not in _IMAGE_PREVIEW_EXTS:
+        raise HTTPException(404, "File not found")
+    return FileResponse(str(file_path))
+
+
 # ── Статика — монтируем последней, чтобы не перекрывать API ───────────────────
 if _WEB_DIR.exists():
     app.mount("/", StaticFiles(directory=str(_WEB_DIR), html=True), name="web")
