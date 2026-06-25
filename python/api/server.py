@@ -72,6 +72,19 @@ from api.db import (                                          # noqa: E402
 _DB_FILE = Path(os.environ.get("SCANNER_DB", str(_DATA_DIR / "scans.db")))
 _db_init(_DB_FILE)
 
+# При старте: все "running" сканы — залипшие (убиты Диспетчером) → error.
+# Оборачиваем в try/except: если DB заблокирована (journal-файл от краша),
+# не мешаем старту — пользователь всё равно может читать облака.
+try:
+    for _stuck in _db_get_all():
+        if _stuck.get("status") == "running":
+            _db_update(_stuck["id"], status="error",
+                       error_msg="Прерван (программа была закрыта)")
+            logger.warning("Scan #%d '%s' помечен error (был stuck running)",
+                           _stuck["id"], _stuck.get("name", ""))
+except Exception as _e:
+    logger.warning("Не удалось обновить залипшие сканы при старте: %s", _e)
+
 _last_scan = _db_last_done()
 if _last_scan and _last_scan.get("ply_path") and Path(_last_scan["ply_path"]).exists():
     _put(
@@ -99,6 +112,27 @@ def _find_mesh(workspace: Path) -> Path | None:
     return None
 
 
+def _auto_find_workspace(created_at: str) -> Path | None:
+    """
+    Если workspace не записан в БД — ищем папку по дате скана.
+    created_at формат: '2026-05-22T01:07:19'  →  ищем '20260522_01*' в data/workspace/.
+    """
+    ws_root = _PROJECT_ROOT / "data" / "workspace"
+    if not ws_root.exists():
+        return None
+    try:
+        # '2026-05-22T01:07:19' → '20260522'
+        date_prefix = created_at[:10].replace("-", "")
+        for d in sorted(ws_root.iterdir(), reverse=True):
+            if d.is_dir() and d.name.startswith(date_prefix):
+                return d
+    except Exception:
+        pass
+    return None
+
+
+
+
 def _pipeline_thread(images_dir: Path, output_path: Path, scan_id: int,
                      quality: str = "medium") -> None:
     """Запускается в daemon-потоке: полный пайплайн сканирования."""
@@ -111,10 +145,16 @@ def _pipeline_thread(images_dir: Path, output_path: Path, scan_id: int,
     def _cb(step: str, progress: float) -> None:
         _put(step=step, progress=progress)
 
+    def _on_workspace(ws: Path) -> None:
+        _db_update(scan_id, workspace=str(ws))
+        logger.info("Workspace создан: %s", ws)
+
     try:
         cfg = ScanConfig(**_QUALITY_PRESETS.get(quality, {}))
         result = ScanPipeline(cfg).scan(
-            images_dir, output_path, progress_callback=_cb,
+            images_dir, output_path,
+            progress_callback=_cb,
+            on_workspace=_on_workspace,
         )
         ws        = result.workspace
         ply_path  = ws / "mesh" / "point_cloud_clean.ply"
@@ -191,7 +231,24 @@ def scan_start(body: StartBody):
 
 @app.get("/api/scans")
 def list_scans():
-    return _db_get_all()
+    scans = _db_get_all()
+    for s in scans:
+        if s.get("status") in ("error", "running"):
+            # Автопоиск workspace если не записан в БД
+            ws_str = s.get("workspace") or ""
+            if not ws_str or not Path(ws_str).exists():
+                found = _auto_find_workspace(s.get("created_at", ""))
+                if found:
+                    ws_str = str(found)
+                    logger.info("Scan #%d: workspace auto-found → %s", s["id"], found)
+
+            # Автопоиск ply_path из workspace если не в БД
+            if not s.get("ply_path") and ws_str:
+                ws_ply = Path(ws_str) / "mesh" / "point_cloud_clean.ply"
+                if ws_ply.exists():
+                    s["ply_path"] = str(ws_ply)
+    return scans
+
 
 
 @app.post("/api/scans/{scan_id}/load")
@@ -199,9 +256,16 @@ def load_scan(scan_id: int):
     scan = _db_get_scan(scan_id)
     if not scan:
         raise HTTPException(404, "Scan not found")
-    if scan["status"] != "done":
-        raise HTTPException(400, f"Scan status is '{scan['status']}', expected 'done'")
     ply = scan.get("ply_path")
+    ws_str = scan.get("workspace") or ""
+    if not ws_str or not Path(ws_str).exists():
+        found = _auto_find_workspace(scan.get("created_at", ""))
+        if found:
+            ws_str = str(found)
+    if (not ply or not Path(ply).exists()) and ws_str:
+        ws_ply = Path(ws_str) / "mesh" / "point_cloud_clean.ply"
+        if ws_ply.exists():
+            ply = str(ws_ply)
     if not ply or not Path(ply).exists():
         raise HTTPException(404, "PLY file not found on disk")
     _put(
@@ -777,6 +841,169 @@ def smooth_mesh(iterations: int = 3):
 
     logger.info("smooth → %s (%d iters)", out.name, iterations)
     return {"ok": True}
+
+
+# ── Color Clustering ──────────────────────────────────────────────────────────
+
+class ColorClustersDeleteBody(BaseModel):
+    cluster_ids: list[int]
+
+
+@app.post("/api/color_clusters/analyze")
+def color_clusters_analyze(k: int = 10):
+    import numpy as np
+
+    ply_str = _get().get("result_ply")
+    if not ply_str or not Path(ply_str).exists():
+        raise HTTPException(404, "Point cloud not available")
+
+    ply_path = Path(ply_str)
+
+    try:
+        import sys
+        sys.path.insert(0, str(_PROJECT_ROOT / "python"))
+        from scanner import PointCloud
+        pc = PointCloud()
+        if not pc.load_ply(str(ply_path)):
+            raise HTTPException(500, f"Cannot load PLY: {ply_path}")
+        cols = np.asarray(pc.colors, dtype=np.float32)
+        if cols.ndim != 2 or cols.shape[1] != 3 or len(cols) == 0:
+            raise HTTPException(400, "Point cloud has no color data")
+        # Нормализовать в [0,1] если значения > 1 (uint8 range)
+        colors_rgb = cols / 255.0 if cols.max() > 1.0 else cols
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Cannot load PLY: {exc}")
+
+    N = len(colors_rgb)
+    if N == 0:
+        raise HTTPException(400, "Empty point cloud")
+
+    # Vectorised RGB → HS (ignore V — brightness varies with lighting)
+    r, g, b = colors_rgb[:, 0], colors_rgb[:, 1], colors_rgb[:, 2]
+    maxc  = np.maximum(np.maximum(r, g), b)
+    minc  = np.minimum(np.minimum(r, g), b)
+    delta = maxc - minc
+
+    s = np.where(maxc > 0, delta / maxc, 0.0).astype(np.float32)
+    h = np.zeros(N, dtype=np.float32)
+    mask_r = (delta > 0) & (maxc == r)
+    mask_g = (delta > 0) & (maxc == g)
+    mask_b = (delta > 0) & (maxc == b)
+    h[mask_r] = (((g[mask_r] - b[mask_r]) / delta[mask_r]) % 6.0) / 6.0
+    h[mask_g] = ((b[mask_g] - r[mask_g]) / delta[mask_g] + 2.0) / 6.0
+    h[mask_b] = ((r[mask_b] - g[mask_b]) / delta[mask_b] + 4.0) / 6.0
+
+    hs = np.column_stack([h, s])
+
+    try:
+        from sklearn.cluster import KMeans
+    except ImportError:
+        raise HTTPException(500, "scikit-learn not installed")
+
+    k = max(2, min(k, N, 20))
+    km = KMeans(n_clusters=k, random_state=42, n_init=10, max_iter=100)
+    t_km0 = time.monotonic()
+    km.fit(hs)
+    kmeans_time_s = round(time.monotonic() - t_km0, 2)
+    raw_labels = km.labels_  # (N,) int, values 0..k-1
+
+    # Медианный RGB каждого кластера
+    medians = np.zeros((k, 3), dtype=np.float32)
+    for ci in range(k):
+        mask = (raw_labels == ci)
+        if mask.any():
+            medians[ci] = np.median(colors_rgb[mask], axis=0)
+
+    # Слить кластеры со схожими цветами (RGB евклидово расстояние < порога)
+    MERGE_THRESH = 25.0 / 255.0   # ~10% диапазона — меньше агрессивного слияния
+    parent = list(range(k))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(k):
+        for j in range(i + 1, k):
+            if np.linalg.norm(medians[i] - medians[j]) < MERGE_THRESH:
+                ri, rj = _find(i), _find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    # Векторизированное перемаркирование: old_id → root_id
+    remap = np.array([_find(ci) for ci in range(k)], dtype=np.int16)
+    labels = remap[raw_labels]
+
+    labels_path = ply_path.parent / "_color_cluster_labels.npy"
+    np.save(str(labels_path), labels)
+
+    # Пересчитать кластеры после слияния
+    clusters = []
+    for ci in map(int, np.unique(labels)):
+        mask = (labels == ci)
+        count = int(mask.sum())
+        med = np.median(colors_rgb[mask], axis=0)
+        clusters.append({
+            "id":      ci,
+            "color":   [int(med[0] * 255), int(med[1] * 255), int(med[2] * 255)],
+            "count":   count,
+            "percent": round(count / N * 100, 1),
+        })
+
+    clusters.sort(key=lambda c: c["count"], reverse=True)
+    logger.info("color_clusters_analyze: k=%d N=%d → %d merged clusters, KMeans=%.2fs",
+                k, N, len(clusters), kmeans_time_s)
+    return {"clusters": clusters, "labels": labels.tolist(), "total": N,
+            "kmeans_time_s": kmeans_time_s, "k_input": k, "k_merged": len(clusters)}
+
+
+@app.post("/api/color_clusters/delete")
+def color_clusters_delete(body: ColorClustersDeleteBody):
+    import sys
+    import numpy as np
+    sys.path.insert(0, str(_PROJECT_ROOT / "python"))
+
+    ply_str = _get().get("result_ply")
+    if not ply_str or not Path(ply_str).exists():
+        raise HTTPException(404, "Point cloud not available")
+
+    ply_path    = Path(ply_str)
+    labels_path = ply_path.parent / "_color_cluster_labels.npy"
+    if not labels_path.exists():
+        raise HTTPException(400, "No cluster analysis — run analyze first")
+
+    labels = np.load(str(labels_path))
+    keep   = ~np.isin(labels, body.cluster_ids)
+
+    from scanner import PointCloud
+    pc = PointCloud()
+    if not pc.load_ply(str(ply_path)):
+        raise HTTPException(500, f"Cannot load PLY: {ply_path}")
+
+    pts = np.asarray(pc.points, dtype=np.float64)
+    n   = len(pts)
+    pc.points = pts[keep]
+
+    norms = np.asarray(pc.normals)
+    if len(norms) == n:
+        pc.normals = norms[keep]
+    cols = np.asarray(pc.colors)
+    if len(cols) == n:
+        pc.colors = cols[keep]
+
+    pc.estimate_normals(k=30)
+
+    if not pc.save_ply(str(ply_path)):
+        raise HTTPException(500, "Cannot save PLY")
+
+    np.save(str(labels_path), labels[keep])
+
+    remaining = int(keep.sum())
+    logger.info("color_clusters_delete: clusters=%s → %d pts", body.cluster_ids, remaining)
+    return {"ok": True, "remaining": remaining}
 
 
 # ── Photos preview ────────────────────────────────────────────────────────────

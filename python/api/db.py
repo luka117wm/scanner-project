@@ -1,8 +1,4 @@
-"""SQLite хранилище истории сканов.
-
-Схема: одна таблица scans с полями для всего что нужно восстановить
-после перезапуска сервера (пути, статус, images_dir, workspace).
-"""
+"""SQLite хранилище истории сканов."""
 from __future__ import annotations
 
 import sqlite3
@@ -13,12 +9,15 @@ from pathlib import Path
 _DB_PATH: Path | None = None
 
 
-# ── Инициализация ──────────────────────────────────────────────────────────────
-
 def init_db(db_path: Path) -> None:
-    """Установить путь к БД и создать таблицы если не существуют."""
     global _DB_PATH
     _DB_PATH = db_path
+    # Пытаемся удалить залипшие файлы от предыдущей сессии (безопасно: uncommitted).
+    for suffix in ("-journal", "-wal", "-shm"):
+        try:
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+        except OSError:
+            pass  # файл заблокирован — SQLite попробует восстановить сам
     with _conn() as c:
         c.execute("""
             CREATE TABLE IF NOT EXISTS scans (
@@ -37,20 +36,15 @@ def init_db(db_path: Path) -> None:
         """)
 
 
-# ── Внутренний коннект ─────────────────────────────────────────────────────────
-
 def _conn() -> closing:
     if _DB_PATH is None:
         raise RuntimeError("DB not initialized — call init_db() first")
-    c = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+    c = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=10)
     c.row_factory = sqlite3.Row
     return closing(c)
 
 
-# ── CRUD ───────────────────────────────────────────────────────────────────────
-
 def insert_scan(*, name: str, images_dir: str, workspace: str = "") -> int:
-    """Вставить запись о новом скане, вернуть id."""
     with _conn() as c:
         cur = c.execute(
             """INSERT INTO scans (name, created_at, images_dir, workspace, status)
@@ -62,7 +56,6 @@ def insert_scan(*, name: str, images_dir: str, workspace: str = "") -> int:
 
 
 def update_scan(scan_id: int, **kwargs) -> None:
-    """Обновить произвольные поля записи по id."""
     if not kwargs:
         return
     cols = ", ".join(f"{k} = ?" for k in kwargs)
@@ -73,21 +66,18 @@ def update_scan(scan_id: int, **kwargs) -> None:
 
 
 def get_scan(scan_id: int) -> dict | None:
-    """Получить одну запись по id, или None."""
     with _conn() as c:
         row = c.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
     return dict(row) if row else None
 
 
 def get_all_scans() -> list[dict]:
-    """Все записи, новые первыми."""
     with _conn() as c:
         rows = c.execute("SELECT * FROM scans ORDER BY id DESC").fetchall()
     return [dict(r) for r in rows]
 
 
 def get_last_done_scan() -> dict | None:
-    """Последний скан со статусом done, или None."""
     with _conn() as c:
         row = c.execute(
             "SELECT * FROM scans WHERE status = 'done' ORDER BY id DESC LIMIT 1"
@@ -96,7 +86,6 @@ def get_last_done_scan() -> dict | None:
 
 
 def delete_scan(scan_id: int) -> None:
-    """Удалить запись по id."""
     with _conn() as c:
         c.execute("DELETE FROM scans WHERE id = ?", (scan_id,))
         c.commit()

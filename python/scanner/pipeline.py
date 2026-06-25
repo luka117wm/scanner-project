@@ -30,6 +30,30 @@ _STEPS: list[tuple[str, float]] = [
 ProgressCallback = Callable[[str, float], None]
 
 
+# ── Определение чекпоинта ──────────────────────────────────────────────────────
+
+def checkpoint_step(workspace: Path, output_path: Path) -> str:
+    """
+    Вернуть имя шага, с которого можно продолжить пайплайн.
+    Проверяет файлы в workspace и возвращает первый незавершённый шаг.
+    Возможные значения: 'print_prep', 'mesh_repair', 'poisson',
+                        'point_cloud', 'colmap'  (нельзя продолжить).
+    """
+    if output_path.exists():
+        return "done"
+    mesh_dir = workspace / "mesh"
+    for name in ("mesh_fixed.ply", "mesh_repaired.ply"):
+        if (mesh_dir / name).exists():
+            return "print_prep"
+    if (mesh_dir / "mesh_raw.ply").exists():
+        return "mesh_repair"
+    if (mesh_dir / "point_cloud_clean.ply").exists():
+        return "poisson"
+    if (workspace / "colmap" / "dense" / "fused.ply").exists():
+        return "point_cloud"
+    return "colmap"
+
+
 # ── Результат ─────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -69,6 +93,7 @@ class ScanPipeline:
         input_path: Path,
         output_path: Path,
         progress_callback: ProgressCallback | None = None,
+        on_workspace: Callable[[Path], None] | None = None,
     ) -> ScanResult:
         """
         Запустить полный пайплайн.
@@ -86,6 +111,8 @@ class ScanPipeline:
 
         input_type = self._detect_input_type(input_path)
         workspace  = self._make_workspace()
+        if on_workspace:
+            on_workspace(workspace)   # сохранить путь в БД до начала тяжёлой работы
 
         logger.info("=== ScanPipeline start ===")
         logger.info("  input:     %s (%s)", input_path, input_type)
@@ -159,6 +186,112 @@ class ScanPipeline:
             workspace=workspace,
             n_images=colmap_result.n_images,
             matcher_used=colmap_result.matcher_used,
+            elapsed_seconds=elapsed,
+            steps_completed=steps_done,
+            export=export_result,
+        )
+
+    def resume(
+        self,
+        workspace: Path,
+        images_dir: Path,
+        output_path: Path,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ScanResult:
+        """
+        Продолжить пайплайн с последнего чекпоинта в workspace.
+        Определяет какие шаги уже выполнены по наличию файлов и запускает
+        только оставшиеся.
+        """
+        workspace   = workspace.resolve()
+        output_path = output_path.resolve()
+        mesh_dir    = workspace / "mesh"
+
+        start = checkpoint_step(workspace, output_path)
+        logger.info("=== ScanPipeline resume from '%s' ===", start)
+
+        _weights = dict(_STEPS)
+        _all     = [s for s, _ in _STEPS]
+        start_idx = _all.index(start) if start in _all else 0
+
+        # Прогресс накопленный уже выполненными шагами
+        cumulative = sum(_weights.get(s, 0.0) for s in _all[:start_idx])
+        steps_done = list(_all[:start_idx])
+
+        def _progress(step: str) -> None:
+            nonlocal cumulative
+            if progress_callback:
+                progress_callback(step, cumulative)
+            logger.info("Step: %s (%.0f%%)", step, cumulative * 100)
+            cumulative = min(1.0, cumulative + _weights.get(step, 0.0))
+
+        t0       = time.monotonic()
+        mesh_proc = MeshProcessor(self.config)
+        exp       = Exporter(self.config)
+
+        # ── Найти / построить repaired_ply ───────────────────────────────────
+        repaired_ply: Path | None = None
+
+        if start == "print_prep":
+            for name in ("mesh_fixed.ply", "mesh_repaired.ply"):
+                p = mesh_dir / name
+                if p.exists():
+                    repaired_ply = p
+                    break
+
+        elif start == "mesh_repair":
+            _progress("mesh_repair")
+            repaired_ply = mesh_proc.repair_from_raw(
+                mesh_dir / "mesh_raw.ply", mesh_dir
+            )
+            steps_done.append("mesh_repair")
+
+        elif start == "poisson":
+            _progress("poisson")
+            raw_ply = mesh_dir / "mesh_raw.ply"
+            mesh_proc._poisson_mesh(mesh_dir / "point_cloud_clean.ply", raw_ply)
+            steps_done.append("poisson")
+            _progress("mesh_repair")
+            repaired_ply = mesh_proc.repair_from_raw(raw_ply, mesh_dir)
+            steps_done.append("mesh_repair")
+
+        elif start == "point_cloud":
+            fused_ply = workspace / "colmap" / "dense" / "fused.ply"
+            _progress("point_cloud")
+            repaired_ply = mesh_proc.process_cloud(fused_ply, mesh_dir)
+            steps_done += ["point_cloud", "poisson", "mesh_repair"]
+            _progress("poisson")
+            _progress("mesh_repair")
+
+        else:
+            raise RuntimeError(
+                f"Невозможно продолжить с шага '{start}': "
+                "нет промежуточных файлов в workspace."
+            )
+
+        if repaired_ply is None or not repaired_ply.exists():
+            raise RuntimeError(f"repaired PLY не найден: {repaired_ply}")
+
+        # ── Шаги 9-10 ────────────────────────────────────────────────────────
+        _progress("print_prep")
+        export_result = exp.prepare_and_export(repaired_ply, output_path)
+        steps_done.append("print_prep")
+
+        _progress("export")
+        steps_done.append("export")
+
+        if progress_callback:
+            progress_callback("done", 1.0)
+
+        elapsed = time.monotonic() - t0
+        logger.info("=== ScanPipeline resume done: %.1f сек → %s ===",
+                    elapsed, output_path)
+
+        return ScanResult(
+            output_path=output_path,
+            workspace=workspace,
+            n_images=0,
+            matcher_used="resume",
             elapsed_seconds=elapsed,
             steps_completed=steps_done,
             export=export_result,

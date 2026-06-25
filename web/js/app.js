@@ -380,10 +380,10 @@ async function loadHistory() {
       const meta   = [photos, date].filter(Boolean).join(' · ');
       const statusClass = s.status === 'done' ? 'ok' : s.status === 'error' ? 'fail' : '';
       const statusText  = s.status === 'done' ? 'DONE' : s.status === 'error' ? 'FAIL' : s.status;
-
-      return `<div class="scan-card${s.status === 'done' ? '' : ' undone'}${active}" data-id="${s.id}">
+      const loadable = s.status === 'done' || !!s.ply_path;
+      return `<div class="scan-card${loadable ? '' : ' undone'}${active}" data-id="${s.id}">
         <div class="scan-thumb"></div>
-        <div>
+        <div class="scan-info">
           <div class="scan-name">${s.name}</div>
           <div class="scan-meta">${meta}</div>
         </div>
@@ -394,8 +394,43 @@ async function loadHistory() {
     list.querySelectorAll('.scan-card:not(.undone)').forEach(el => {
       el.addEventListener('click', () => _loadScan(parseInt(el.dataset.id)));
     });
+    list.querySelectorAll('.scan-card').forEach(el => {
+      el.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        const id   = parseInt(el.dataset.id);
+        const scan = scans.find(s => s.id === id);
+        _showScanCtx(e.clientX, e.clientY, scan);
+      });
+    });
   } catch { /* сервер недоступен */ }
 }
+
+// ── Контекстное меню ───────────────────────────────────────────────────────────
+let _ctxScan = null;
+const _ctxMenu = document.getElementById('scanCtxMenu');
+
+document.addEventListener('click', () => { _ctxMenu.style.display = 'none'; });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') _ctxMenu.style.display = 'none'; });
+
+function _showScanCtx(x, y, scan) {
+  _ctxScan = scan;
+  document.getElementById('ctxLoad').hidden = !scan.ply_path && scan.status !== 'done';
+
+  _ctxMenu.style.display = 'block';
+  const mx = Math.min(x, window.innerWidth  - _ctxMenu.offsetWidth  - 8);
+  const my = Math.min(y, window.innerHeight - _ctxMenu.offsetHeight - 8);
+  _ctxMenu.style.left = mx + 'px';
+  _ctxMenu.style.top  = my + 'px';
+}
+
+document.getElementById('ctxLoad').addEventListener('click', () => {
+  if (_ctxScan) _loadScan(_ctxScan.id);
+});
+document.getElementById('ctxDelete').addEventListener('click', async () => {
+  if (!_ctxScan) return;
+  await fetch(`/api/scans/${_ctxScan.id}`, { method: 'DELETE' });
+  await loadHistory();
+});
 
 async function _loadScan(id) {
   const r = await fetch(`/api/scans/${id}/load`, { method: 'POST' });

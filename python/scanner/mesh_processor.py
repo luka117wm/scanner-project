@@ -148,6 +148,41 @@ class MeshProcessor:
 
         return repaired_ply
 
+    def repair_from_raw(self, raw_mesh_ply: Path, workspace: Path) -> Path:
+        """
+        Шаги 6-8: загрузить mesh_raw.ply → repair → pymeshfix → вернуть путь.
+        Используется при resume пайплайна когда Poisson уже выполнен.
+        """
+        from scanner import MeshRepair, TriangleMesh
+
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        mesh = TriangleMesh()
+        if not mesh.load_ply(str(raw_mesh_ply)):
+            raise RuntimeError(f"Cannot load mesh PLY: {raw_mesh_ply}")
+        logger.info("Steps 6-8 (repair only): %d verts, %d faces",
+                    mesh.num_vertices(), mesh.num_faces())
+
+        repair = MeshRepair(mesh)
+        report = repair.repair_all(
+            smooth_iterations=self.config.smooth_iterations,
+            max_hole_edges=self.config.max_hole_edges,
+        )
+        logger.info(
+            "  Repair: degen=%d dup=%d merged=%d manifold=%d holes=%d smooth=%d",
+            report.degenerate_removed, report.duplicate_removed,
+            report.vertices_merged, report.non_manifold_removed,
+            report.holes_filled, report.smooth_iterations,
+        )
+
+        repaired_ply = workspace / "mesh_repaired.ply"
+        if not mesh.save_ply(str(repaired_ply)):
+            raise RuntimeError(f"Cannot save repaired PLY: {repaired_ply}")
+        logger.info("  Repaired: %s (%d verts, %d faces)",
+                    repaired_ply.name, mesh.num_vertices(), mesh.num_faces())
+
+        return self._apply_pymeshfix(repaired_ply, workspace)
+
     # ── Вспомогательные методы ─────────────────────────────────────────────────
 
     def _estimate_dbscan_eps(self, pc) -> float:

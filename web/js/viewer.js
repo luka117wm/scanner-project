@@ -246,6 +246,8 @@ export function setViewMode(mode) {
 export async function loadPLY(url) {
   const geometry = await new PLYLoader().loadAsync(url);
   _disposeObject(pointsObj);
+  // Геометрия заменяется — старый backup цветов невалиден
+  if (currentMode === 'colors') cc.originalColors = null;
 
   const hasColor = !!geometry.attributes.color;
   const mat = new THREE.PointsMaterial({
@@ -604,6 +606,252 @@ function _setupRepairButtons() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// COLORS — кластеризация по цвету
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const cc = {
+  originalColors: null,  // Float32Array — backup vertex colors
+  labels:         null,  // Int16Array — cluster label per point
+  clusters:       [],    // [{id, color, count, percent}]
+  selected:       new Set(),
+  vizColors:      [],    // [[r,g,b] in 0-1] per cluster id
+};
+
+function _hue2rgb(p, q, t) {
+  if (t < 0) t += 1; if (t > 1) t -= 1;
+  if (t < 1/6) return p + (q - p) * 6 * t;
+  if (t < 1/2) return q;
+  if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+  return p;
+}
+
+function _hslToRgb01(h, s, l) {
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return [_hue2rgb(p, q, h + 1/3), _hue2rgb(p, q, h), _hue2rgb(p, q, h - 1/3)];
+}
+
+function _genVizColor(i) {
+  // Golden angle spread for maximum visual separation between clusters
+  return _hslToRgb01(((i * 137.508) % 360) / 360, 0.78, 0.55);
+}
+
+function _ccBackupColors() {
+  if (!pointsObj) return;
+  const geo = pointsObj.geometry;
+  if (!geo.attributes.color) return;
+  cc.originalColors = geo.attributes.color.array.slice();
+}
+
+function _ccRestoreColors() {
+  if (!pointsObj || !cc.originalColors) return;
+  const arr = pointsObj.geometry.attributes.color?.array;
+  // Восстанавливаем только если размер совпадает (PLY мог быть перезагружен)
+  if (arr && arr.length === cc.originalColors.length) {
+    arr.set(cc.originalColors);
+    pointsObj.geometry.attributes.color.needsUpdate = true;
+  }
+  cc.originalColors = null;
+}
+
+function _ccApplyColors() {
+  if (!pointsObj || !cc.labels || !cc.clusters.length) return;
+  const geo = pointsObj.geometry;
+  if (!geo.attributes.color) return;
+  const arr = geo.attributes.color.array;
+
+  // Карта: cluster id → [r, g, b] в диапазоне 0–1 (реальный цвет)
+  const colorMap = {};
+  for (const c of cc.clusters) {
+    colorMap[c.id] = [c.color[0] / 255, c.color[1] / 255, c.color[2] / 255];
+  }
+
+  const hasSel = cc.selected.size > 0;
+
+  for (let i = 0; i < cc.labels.length; i++) {
+    const ci = cc.labels[i];
+    if (cc.selected.has(ci)) {
+      // Выбранный кластер → яркий жёлтый, хорошо виден на любом фоне
+      arr[i*3] = 1.0; arr[i*3+1] = 1.0; arr[i*3+2] = 0.0;
+    } else {
+      const col = colorMap[ci] || [0.5, 0.5, 0.5];
+      if (hasSel) {
+        // Остальные точки — затемнить до 25%, чтобы выделение было контрастным
+        const g = (col[0] + col[1] + col[2]) / 3 * 0.25;
+        arr[i*3] = g; arr[i*3+1] = g; arr[i*3+2] = g;
+      } else {
+        // Без выделения — реальный цвет кластера
+        arr[i*3] = col[0]; arr[i*3+1] = col[1]; arr[i*3+2] = col[2];
+      }
+    }
+  }
+  geo.attributes.color.needsUpdate = true;
+}
+
+function _ccRenderList() {
+  const listEl = $('clusterList');
+  if (!listEl) return;
+  listEl.innerHTML = cc.clusters.map(c => {
+    // Реальный цвет кластера (медиана RGB)
+    const vizCss  = `rgb(${c.color[0]},${c.color[1]},${c.color[2]})`;
+    const isSmall = c.percent < 3;
+    const isSel   = cc.selected.has(c.id);
+    return `<div class="cluster-item${isSel ? ' selected' : ''}" data-cid="${c.id}">
+      <span class="cluster-swatch" style="background:${vizCss}"></span>
+      <span class="cluster-name">${c.count.toLocaleString('ru')} pts</span>
+      <span class="cluster-pct">${c.percent}%</span>
+      ${isSmall ? '<span class="cluster-badge">мало</span>' : ''}
+    </div>`;
+  }).join('');
+
+  listEl.querySelectorAll('.cluster-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const cid = parseInt(el.dataset.cid);
+      if (cc.selected.has(cid)) cc.selected.delete(cid); else cc.selected.add(cid);
+      _ccApplyColors();
+      _ccRenderList();
+      const hasSel = cc.selected.size > 0;
+      $('ccDeleteSelected').disabled = !hasSel;
+      $('ccSelectSimilar').disabled  = !hasSel;
+    });
+  });
+}
+
+function _setupColorsButtons() {
+  // Слайдер k
+  $('ccK').addEventListener('input', () => { $('ccKVal').textContent = $('ccK').value; });
+
+  $('ccAnalyze').onclick = async () => {
+    $('ccAnalyze').disabled = true;
+    $('ccStatus').textContent = 'Анализ...';
+    try {
+      const k = $('ccK').value;
+      const r = await fetch(`/api/color_clusters/analyze?k=${k}`, { method: 'POST' });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `HTTP ${r.status}`);
+      const data = await r.json();
+
+      cc.labels   = new Int16Array(data.labels);
+      cc.clusters = data.clusters;
+      cc.selected.clear();
+
+      if (!cc.originalColors) _ccBackupColors();
+      _ccApplyColors();
+      _ccRenderList();
+
+      const timeStr = data.kmeans_time_s != null ? ` · KMeans ${data.kmeans_time_s}s` : '';
+      $('ccStatus').textContent = `${data.clusters.length} кластеров · ${data.total.toLocaleString('ru')} точек${timeStr}`;
+      $('ccDeleteSelected').disabled = true;
+      $('ccSelectSimilar').disabled = true;
+    } catch (e) {
+      $('ccStatus').textContent = `Ошибка: ${e.message}`;
+    } finally {
+      $('ccAnalyze').disabled = false;
+    }
+  };
+
+  $('ccDeleteSelected').onclick = async () => {
+    if (cc.selected.size === 0) return;
+    $('ccDeleteSelected').disabled = true;
+    $('ccStatus').textContent = 'Удаление...';
+    try {
+      const r = await fetch('/api/color_clusters/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cluster_ids: Array.from(cc.selected) }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `HTTP ${r.status}`);
+      const data = await r.json();
+
+      // Сбросить состояние до перезагрузки PLY
+      cc.selected.clear(); cc.labels = null; cc.clusters = [];
+      cc.originalColors = null;
+      $('clusterList').innerHTML = '';
+      $('ccStatus').textContent = `Удалено. Осталось ${data.remaining.toLocaleString('ru')} точек. Нажмите «Анализировать» снова.`;
+
+      await loadPLY('/api/result/ply?' + Date.now());
+    } catch (e) {
+      $('ccStatus').textContent = `Ошибка: ${e.message}`;
+      $('ccDeleteSelected').disabled = cc.selected.size === 0;
+    }
+  };
+
+  // Выбрать кластеры, чей цвет близок к уже выбранным
+  $('ccSelectSimilar').onclick = () => {
+    if (cc.selected.size === 0) return;
+    const THRESH = 55 / 255;  // RGB евклидово расстояние
+    const colorOf = (c) => [c.color[0]/255, c.color[1]/255, c.color[2]/255];
+    const dist = (a, b) => Math.sqrt(a.reduce((s,v,i) => s + (v-b[i])**2, 0));
+
+    const selColors = cc.clusters.filter(c => cc.selected.has(c.id)).map(colorOf);
+    let added = 0;
+    for (const c of cc.clusters) {
+      if (cc.selected.has(c.id)) continue;
+      const col = colorOf(c);
+      if (selColors.some(sc => dist(col, sc) < THRESH)) {
+        cc.selected.add(c.id);
+        added++;
+      }
+    }
+    _ccApplyColors();
+    _ccRenderList();
+    $('ccDeleteSelected').disabled = cc.selected.size === 0;
+    $('ccStatus').textContent = added > 0
+      ? `Добавлено ${added} похожих кластеров`
+      : 'Похожих кластеров не найдено';
+  };
+
+  $('ccReset').onclick = () => {
+    cc.selected.clear();
+    _ccRestoreColors();
+    _ccRenderList();
+    $('ccDeleteSelected').disabled = true;
+    $('ccSelectSimilar').disabled  = true;
+  };
+
+  $('ccRemesh').onclick = async () => {
+    const r = await fetch('/api/edit/remesh', { method: 'POST' });
+    if (r.ok) {
+      document.dispatchEvent(new CustomEvent('remesh-started'));
+      $('ccRemesh').disabled = true;
+      $('ccStatus').textContent = 'Идёт пересчёт меша...';
+    }
+  };
+
+  document.addEventListener('remesh-done', () => {
+    const btn = $('ccRemesh');
+    if (btn) btn.disabled = false;
+    // PLY перезагружен после remesh — сбросить устаревшее состояние кластеров
+    cc.labels = null; cc.clusters = []; cc.originalColors = null;
+    const listEl = $('clusterList');
+    if (listEl) listEl.innerHTML = '';
+    const statusEl = $('ccStatus');
+    if (statusEl) statusEl.textContent = 'Нажмите «Анализировать» снова';
+    const delBtn = $('ccDeleteSelected');
+    if (delBtn) delBtn.disabled = true;
+    const simBtn = $('ccSelectSimilar');
+    if (simBtn) simBtn.disabled = true;
+  }, { once: true });
+}
+
+function _enterColors() {
+  if (!pointsObj) return;
+  _showLayer('points');
+  $('colors-tools').classList.add('visible');
+  $('colorClusterPanel').style.display = '';
+  _setupColorsButtons();
+}
+
+function _exitColors() {
+  _ccRestoreColors();
+  cc.selected.clear(); cc.labels = null; cc.clusters = [];
+  cc.originalColors = null; cc.vizColors = [];
+  $('colors-tools').classList.remove('visible');
+  $('colorClusterPanel').style.display = 'none';
+  $('clusterList').innerHTML = '';
+  $('ccStatus').textContent = 'Нажмите «Анализировать»';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ПУБЛИЧНЫЙ API
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -611,11 +859,13 @@ export function setMode(mode) {
   if (currentMode === 'orient'  && mode !== 'orient')  _exitOrient();
   if (currentMode === 'denoise' && mode !== 'denoise') _exitDenoise();
   if (currentMode === 'repair'  && mode !== 'repair')  _exitRepair();
+  if (currentMode === 'colors'  && mode !== 'colors')  _exitColors();
 
   currentMode = mode;
 
   if      (mode === 'orient')  _enterOrient();
   else if (mode === 'denoise') _enterDenoise();
   else if (mode === 'repair')  _enterRepair();
+  else if (mode === 'colors')  _enterColors();
   else if (mode === 'view')    _showLayer('points');
 }
